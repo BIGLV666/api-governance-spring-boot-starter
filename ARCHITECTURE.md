@@ -8,7 +8,7 @@
 
 ```
                          ┌──────────────────────────────────────┐
-                         │         唯一 AOP 切面入口              │
+                         │       Controller 治理主切面            │
                          │  GovernanceAspect                    │
                          │  @Around("within(@RestController *)")│
                          └──────────────────┬───────────────────┘
@@ -36,7 +36,8 @@
 
 **设计要点**
 
-1. **唯一切面**：全框架只有一个 `@Around`，避免多切面叠加导致 `proceed()` 被多次调用。
+1. **治理主切面唯一**：Controller 治理管道只有一个 `@Around`；异步动作使用仅匹配
+   `@AsyncAction` 的独立精确切面，两者各自只调用一次 `proceed()`。
 2. **管道过滤器**：所有治理逻辑都抽象为 `PreFilter` / `PostFilter` 插件，按 `order` 排序执行。
 3. **短路语义**：前置链任一返回 `false` → 立即停止，不执行业务方法，由切面抛出 `GovernanceException`，
    经 `@RestControllerAdvice` 转为标准 JSON 拒绝响应。
@@ -49,7 +50,13 @@
 ```
 org.example.apigovernancespringbootstarter
 ├── annotation        最小注解：RateLimit / Skip / NoLog
-├── aspect            GovernanceAspect（唯一切面）
+├── aspect            GovernanceAspect（Controller 治理主切面）
+├── async             方法生命周期异步插件
+│   ├── annotation    AsyncAction / AsyncHandler
+│   ├── event         AsyncEvent / AsyncPhase / AsyncError
+│   ├── spi           Executor / 异常 / 拒绝 / 事件增强扩展点
+│   ├── aspect        精确注解切面
+│   └── internal      启动注册、缓存、调度和默认实现
 ├── filter            管道接口：Filter / PreFilter / PostFilter / FilterContext / FilterChain
 │   └── impl          内置过滤器
 ├── ratelimit         限流：RateLimiter / RateLimitStrategy / 枚举 / StrategyRateLimiter
@@ -133,6 +140,15 @@ public class MyPreFilter implements PreFilter {
 在 `GovernanceManagementController` 中新增端点即可，数据源统一来自
 `MetricsRegistry` / `FilterChain` / `RateLimiter` / `ApiGovernanceProperties`。
 
+### 5. 添加异步方法钩子
+
+`@AsyncAction` 声明动作，`@AsyncHandler` 声明处理器。Registry 在所有单例创建后扫描、校验并缓存
+处理方法；运行期按 `action + phase` 直接查询并按 order 提交。跨线程只传不可变 `AsyncEvent`，
+调用参数、结果和原始异常只短暂暴露给调用线程上的 `AsyncEventEnricher`。
+
+默认线程池、Handler 异常处理和任务拒绝处理均可通过 SPI Bean 替换。完整契约见
+`ASYNC_ACTIONS.md`，内部代码流程见 `ASYNC_IMPLEMENTATION.md`。
+
 ---
 
 ## 七、维护迭代方法
@@ -167,9 +183,10 @@ public class MyPreFilter implements PreFilter {
 
 | 关注点 | 策略 |
 |--------|------|
-| 切面开销 | 唯一切面 + 点切在类级别（`within`），匹配高效 |
+| 切面开销 | Controller 主切面按类匹配；异步切面仅匹配显式 `@AsyncAction` 方法 |
 | 限流 | 本机 O(1)（令牌桶）/ O(窗口内请求数)（滑动窗口），无锁或细粒度锁 |
 | 指标 | `AtomicLong` 无锁计数；有界滑动窗口懒淘汰，无后台线程 |
 | 日志 | 入参/响应体默认关闭，字符串截断防膨胀 |
+| 异步任务 | 启动期扫描缓存；独立有界线程池；事件不持有原始调用对象 |
 | 内存 | 全部有上界（指标条数、API 数量、限流键数量），随进程关闭释放 |
 ```

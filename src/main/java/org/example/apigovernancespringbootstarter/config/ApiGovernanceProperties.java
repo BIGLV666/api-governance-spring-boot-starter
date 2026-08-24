@@ -28,6 +28,15 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *       max-apis: 1000              # 最大统计 API 数量
  *     management:
  *       enabled: true               # 管理接口开关
+ *     async:
+ *       enabled: true               # 方法生命周期异步钩子开关
+ *       core-pool-size: 2           # 独立线程池核心线程数
+ *       max-pool-size: 8            # 独立线程池最大线程数
+ *       queue-capacity: 1000         # 有界队列容量
+ *     tracing:
+ *       enabled: true                # OpenTelemetry 链路追踪总开关
+ *       kafka: true                  # 自动启用 Kafka Observation
+ *       rabbit: true                 # 自动启用 RabbitMQ Observation
  * </pre>
  *
  * @author API Governance Team
@@ -50,6 +59,12 @@ public class ApiGovernanceProperties {
 
     /** 管理接口配置。 */
     private Management management = new Management();
+
+    /** 方法生命周期异步钩子配置。 */
+    private Async async = new Async();
+
+    /** 分布式链路追踪配置。 */
+    private Tracing tracing = new Tracing();
 
     // ==================== getters / setters ====================
 
@@ -91,6 +106,22 @@ public class ApiGovernanceProperties {
 
     public void setManagement(Management management) {
         this.management = management;
+    }
+
+    public Async getAsync() {
+        return async;
+    }
+
+    public void setAsync(Async async) {
+        this.async = async;
+    }
+
+    public Tracing getTracing() {
+        return tracing;
+    }
+
+    public void setTracing(Tracing tracing) {
+        this.tracing = tracing;
     }
 
     // ==================== 嵌套配置类 ====================
@@ -281,6 +312,140 @@ public class ApiGovernanceProperties {
 
         public void setBasePath(String basePath) {
             this.basePath = basePath;
+        }
+    }
+
+    /**
+     * Method lifecycle asynchronous hook configuration.
+     */
+    public static class Async {
+
+        /** Whether annotation-driven asynchronous actions are enabled. */
+        private boolean enabled = true;
+
+        /** Core size of the isolated framework thread pool. */
+        private int corePoolSize = 2;
+
+        /** Maximum size of the isolated framework thread pool. */
+        private int maxPoolSize = 8;
+
+        /** Capacity of the bounded work queue. */
+        private int queueCapacity = 1000;
+
+        /** Idle timeout for non-core threads, in seconds. */
+        private int keepAliveSeconds = 60;
+
+        /** Worker thread name prefix. */
+        private String threadNamePrefix = "api-governance-async-";
+
+        /** Maximum shutdown wait for queued work, in seconds. */
+        private int awaitTerminationSeconds = 5;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public int getCorePoolSize() {
+            return corePoolSize;
+        }
+
+        public void setCorePoolSize(int corePoolSize) {
+            this.corePoolSize = corePoolSize;
+        }
+
+        public int getMaxPoolSize() {
+            return maxPoolSize;
+        }
+
+        public void setMaxPoolSize(int maxPoolSize) {
+            this.maxPoolSize = maxPoolSize;
+        }
+
+        public int getQueueCapacity() {
+            return queueCapacity;
+        }
+
+        public void setQueueCapacity(int queueCapacity) {
+            this.queueCapacity = queueCapacity;
+        }
+
+        public int getKeepAliveSeconds() {
+            return keepAliveSeconds;
+        }
+
+        public void setKeepAliveSeconds(int keepAliveSeconds) {
+            this.keepAliveSeconds = keepAliveSeconds;
+        }
+
+        public String getThreadNamePrefix() {
+            return threadNamePrefix;
+        }
+
+        public void setThreadNamePrefix(String threadNamePrefix) {
+            this.threadNamePrefix = threadNamePrefix;
+        }
+
+        public int getAwaitTerminationSeconds() {
+            return awaitTerminationSeconds;
+        }
+
+        public void setAwaitTerminationSeconds(int awaitTerminationSeconds) {
+            this.awaitTerminationSeconds = awaitTerminationSeconds;
+        }
+    }
+
+    /**
+     * Micrometer Tracing integration. Messaging integrations activate only
+     * when the corresponding client library is present in the application.
+     */
+    public static class Tracing {
+
+        /** Whether automatic trace integration is enabled. */
+        private boolean enabled = true;
+
+        /** Whether framework asynchronous tasks inherit the submitting trace. */
+        private boolean asyncContextPropagation = true;
+
+        /** Whether Spring Kafka templates and listener containers enable Observation. */
+        private boolean kafka = true;
+
+        /** Whether Spring AMQP templates and listener containers enable Observation. */
+        private boolean rabbit = true;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public boolean isAsyncContextPropagation() {
+            return asyncContextPropagation;
+        }
+
+        public void setAsyncContextPropagation(boolean asyncContextPropagation) {
+            this.asyncContextPropagation = asyncContextPropagation;
+        }
+
+        public boolean isKafka() {
+            return kafka;
+        }
+
+        public void setKafka(boolean kafka) {
+            this.kafka = kafka;
+        }
+
+        public boolean isRabbit() {
+            return rabbit;
+        }
+
+        public void setRabbit(boolean rabbit) {
+            this.rabbit = rabbit;
         }
     }
 }

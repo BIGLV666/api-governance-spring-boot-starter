@@ -1,6 +1,9 @@
 package org.example.apigovernancespringbootstarter;
 
 import org.example.apigovernancespringbootstarter.aspect.GovernanceAspect;
+import org.example.apigovernancespringbootstarter.async.aspect.AsyncActionAspect;
+import org.example.apigovernancespringbootstarter.async.internal.AsyncHandlerRegistry;
+import org.example.apigovernancespringbootstarter.async.spi.AsyncExecutorProvider;
 import org.example.apigovernancespringbootstarter.config.ApiGovernanceAutoConfiguration;
 import org.example.apigovernancespringbootstarter.filter.FilterChain;
 import org.example.apigovernancespringbootstarter.management.GovernanceManagementController;
@@ -15,6 +18,7 @@ import org.example.apigovernancespringbootstarter.ratelimit.local.TokenBucketRat
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -37,6 +41,9 @@ class ApiGovernanceAutoConfigurationTests {
             assertThat(ctx).hasSingleBean(GovernanceAspect.class);
             assertThat(ctx).hasSingleBean(GovernanceManagementController.class);
             assertThat(ctx).hasSingleBean(RateLimiter.class);
+            assertThat(ctx).hasSingleBean(AsyncActionAspect.class);
+            assertThat(ctx).hasSingleBean(AsyncHandlerRegistry.class);
+            assertThat(ctx).hasSingleBean(AsyncExecutorProvider.class);
             // 默认：本机令牌桶
             assertThat(ctx.getBean(RateLimiter.class)).isInstanceOf(TokenBucketRateLimiter.class);
         });
@@ -84,6 +91,35 @@ class ApiGovernanceAutoConfigurationTests {
     void managementCanBeDisabled() {
         runner.withPropertyValues("api.governance.management.enabled=false")
                 .run(ctx -> assertThat(ctx).doesNotHaveBean(GovernanceManagementController.class));
+    }
+
+    @Test
+    void asyncActionsCanBeDisabledIndependently() {
+        runner.withPropertyValues("api.governance.async.enabled=false")
+                .run(ctx -> {
+                    assertThat(ctx).doesNotHaveBean(AsyncActionAspect.class);
+                    assertThat(ctx).doesNotHaveBean(AsyncHandlerRegistry.class);
+                    assertThat(ctx).doesNotHaveBean(AsyncExecutorProvider.class);
+                    assertThat(ctx).hasSingleBean(GovernanceAspect.class);
+                });
+    }
+
+    @Test
+    void customExecutorProviderOverridesDefault() {
+        AsyncExecutorProvider custom = () -> Runnable::run;
+        runner.withBean(AsyncExecutorProvider.class, () -> custom)
+                .run(ctx -> assertThat(ctx.getBean(AsyncExecutorProvider.class)).isSameAs(custom));
+    }
+
+    @Test
+    void governanceAspectWrapsAsyncActionAspect() {
+        runner.run(ctx -> {
+            GovernanceAspect governance = ctx.getBean(GovernanceAspect.class);
+            AsyncActionAspect async = ctx.getBean(AsyncActionAspect.class);
+
+            assertThat(AnnotationAwareOrderComparator.INSTANCE.compare(governance, async))
+                    .isLessThan(0);
+        });
     }
 
     @Test

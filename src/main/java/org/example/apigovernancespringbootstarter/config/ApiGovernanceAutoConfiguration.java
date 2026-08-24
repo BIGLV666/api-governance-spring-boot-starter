@@ -1,5 +1,18 @@
 package org.example.apigovernancespringbootstarter.config;
 
+import org.example.apigovernancespringbootstarter.async.aspect.AsyncActionAspect;
+import org.example.apigovernancespringbootstarter.async.internal.AsyncDispatcher;
+import org.example.apigovernancespringbootstarter.async.internal.AsyncEventFactory;
+import org.example.apigovernancespringbootstarter.async.internal.AsyncHandlerRegistry;
+import org.example.apigovernancespringbootstarter.async.internal.DefaultAsyncExecutorProvider;
+import org.example.apigovernancespringbootstarter.async.internal.LoggingAsyncHandlerExceptionHandler;
+import org.example.apigovernancespringbootstarter.async.internal.LoggingAsyncTaskRejectionHandler;
+import org.example.apigovernancespringbootstarter.async.internal.NoopAsyncTaskContextPropagator;
+import org.example.apigovernancespringbootstarter.async.spi.AsyncEventEnricher;
+import org.example.apigovernancespringbootstarter.async.spi.AsyncExecutorProvider;
+import org.example.apigovernancespringbootstarter.async.spi.AsyncHandlerExceptionHandler;
+import org.example.apigovernancespringbootstarter.async.spi.AsyncTaskRejectionHandler;
+import org.example.apigovernancespringbootstarter.async.spi.AsyncTaskContextPropagator;
 import org.example.apigovernancespringbootstarter.aspect.GovernanceAspect;
 import org.example.apigovernancespringbootstarter.exception.GovernanceExceptionHandler;
 import org.example.apigovernancespringbootstarter.filter.FilterChain;
@@ -24,6 +37,7 @@ import org.example.apigovernancespringbootstarter.ratelimit.redis.RedisSlidingWi
 import org.example.apigovernancespringbootstarter.ratelimit.redis.RedisTokenBucketRateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -40,7 +54,8 @@ import java.util.List;
  * API 治理自动配置 —— 「一切皆插件」的装配中心。
  *
  * <p>通过 Spring Boot 自动装配（见 {@code META-INF/spring/...AutoConfiguration.imports}）加载，
- * 一次性注册默认全局配置、唯一 AOP 切面、过滤器管道、限流器插件与后台管理接口。
+ * 一次性注册默认全局配置、Controller 治理主切面、异步动作精确切面、过滤器管道、
+ * 限流器插件与后台管理接口。
  *
  * <h3>「注册 Bean 配置」与「yml 配置」二选一</h3>
  * <ul>
@@ -156,7 +171,7 @@ public class ApiGovernanceAutoConfiguration {
     // ==================== 切面与异常处理 ====================
 
     /**
-     * 唯一 AOP 切面入口。
+     * Controller 治理管道的唯一 AOP 切面入口。
      */
     @Bean
     public GovernanceAspect governanceAspect(FilterChain filterChain,
@@ -171,6 +186,78 @@ public class ApiGovernanceAutoConfiguration {
     @ConditionalOnMissingBean
     public GovernanceExceptionHandler governanceExceptionHandler() {
         return new GovernanceExceptionHandler();
+    }
+
+    // ==================== 方法生命周期异步插件 ====================
+
+    /**
+     * Default isolated and bounded executor. Registering an
+     * {@link AsyncExecutorProvider} Bean replaces it completely.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "api.governance.async", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public AsyncExecutorProvider asyncExecutorProvider(ApiGovernanceProperties properties) {
+        return new DefaultAsyncExecutorProvider(properties.getAsync());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "api.governance.async", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public AsyncHandlerExceptionHandler asyncHandlerExceptionHandler() {
+        return new LoggingAsyncHandlerExceptionHandler();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "api.governance.async", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public AsyncTaskRejectionHandler asyncTaskRejectionHandler() {
+        return new LoggingAsyncTaskRejectionHandler();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "api.governance.async", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public AsyncTaskContextPropagator asyncTaskContextPropagator() {
+        return new NoopAsyncTaskContextPropagator();
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "api.governance.async", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public AsyncHandlerRegistry asyncHandlerRegistry(ConfigurableListableBeanFactory beanFactory) {
+        return new AsyncHandlerRegistry(beanFactory);
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "api.governance.async", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public AsyncEventFactory asyncEventFactory(ObjectProvider<AsyncEventEnricher> enrichers) {
+        return new AsyncEventFactory(enrichers.orderedStream().toList());
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "api.governance.async", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public AsyncDispatcher asyncDispatcher(AsyncHandlerRegistry registry,
+                                           AsyncEventFactory eventFactory,
+                                            AsyncExecutorProvider executorProvider,
+                                            AsyncHandlerExceptionHandler exceptionHandler,
+                                            AsyncTaskRejectionHandler rejectionHandler,
+                                            AsyncTaskContextPropagator contextPropagator) {
+        return new AsyncDispatcher(registry, eventFactory, executorProvider,
+                exceptionHandler, rejectionHandler, contextPropagator);
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "api.governance.async", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public AsyncActionAspect asyncActionAspect(AsyncDispatcher dispatcher) {
+        return new AsyncActionAspect(dispatcher);
     }
 
     // ==================== 后台管理接口 ====================

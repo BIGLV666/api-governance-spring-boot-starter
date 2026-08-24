@@ -2,7 +2,7 @@
 
 > **核心理念：一切皆插件** —— 一个开箱即用、可自定义插拔的轻量级 API 治理 Starter。
 
-通过 **唯一 AOP 切面** 默认拦截所有 Controller 请求，以 **标准管道过滤器**（前置链 + 后置链）驱动
+通过 **Controller 治理切面** 默认拦截所有 Controller 请求，以 **标准管道过滤器**（前置链 + 后置链）驱动
 限流、日志、指标统计等能力。内置本地 / Redis 两种限流、令牌桶 / 滑动窗口两种算法，
 支持自定义算法策略，提供后台管理接口，且**不引入过多外部依赖**。
 
@@ -21,6 +21,7 @@
 - ✅ **内存指标 + 有界滑动窗口**：记录慢方法与响应情况，随进程关闭而销毁，内存永不膨胀。
 - ✅ **后台管理接口**：供管理工具/运维平台查询与重置。
 - ✅ **轻量**：仅依赖 `spring-boot-starter-aop` + `spring-web`，Redis 为可选依赖，无 Lombok。
+- ✅ **异步方法钩子**：`@AsyncAction` + `@AsyncHandler` 支持任意公开 Spring Bean 方法的四阶段旁路任务。
 
 ---
 
@@ -104,6 +105,14 @@ api:
     management:
       enabled: true                   # 管理接口开关（默认 true）
       base-path: /api-governance      # 管理接口基础路径
+    async:
+      enabled: true                   # 异步方法生命周期插件开关
+      core-pool-size: 2               # 独立线程池核心线程数
+      max-pool-size: 8                # 独立线程池最大线程数
+      queue-capacity: 1000            # 有界队列容量
+      keep-alive-seconds: 60
+      thread-name-prefix: api-governance-async-
+      await-termination-seconds: 5
 ```
 
 > **说明**：默认 `default-limit: -1`（不限流），即「拦截但不限流」。若希望全局限流，
@@ -240,7 +249,37 @@ public class ParamCheckFilter implements PreFilter {
 
 ---
 
-## 六、内存指标统计
+## 六、异步方法生命周期插件
+
+目标方法保持同步执行，框架只在其生命周期阶段提交附加异步任务：
+
+```java
+@Service
+public class LoginService {
+
+    @AsyncAction("user.login")
+    public LoginResult login(LoginRequest request) {
+        return doLogin(request);
+    }
+}
+
+@Component
+public class LoginHandlers {
+
+    @AsyncHandler(value = "user.login", phase = AsyncPhase.AFTER_SUCCESS, order = 100)
+    public void saveLoginLog(AsyncEvent event) {
+        // 写 DB、发送通知或更新非关键统计
+    }
+}
+```
+
+支持 `BEFORE`、`AFTER_SUCCESS`、`AFTER_ERROR`、`AFTER_COMPLETION`。所有 Handler 默认异步且不改变原业务结果；`order` 只保证提交顺序，不保证完成顺序。跨线程只传递不可变事件快照，默认不捕获完整参数、返回值和原始异常。
+
+完整使用方式、线程池替换、事件增强、安全边界与限制见 [ASYNC_ACTIONS.md](ASYNC_ACTIONS.md)。
+
+---
+
+## 七、内存指标统计
 
 指标保存在内存中（随进程启动而创建、随进程关闭而销毁，不持久化）。为防止内存膨胀：
 
@@ -251,7 +290,7 @@ public class ParamCheckFilter implements PreFilter {
 
 ---
 
-## 七、后台管理接口
+## 八、后台管理接口
 
 基础路径默认 `/api-governance`（可配置），供管理工具调用：
 
@@ -327,12 +366,63 @@ GET /api-governance/metrics/slow/all
 
 ---
 
-## 八、依赖说明（轻量）
+## 九、分布式链路追踪
+
+Starter 内置 Micrometer Tracing、OpenTelemetry bridge 与 OTLP exporter。HTTP 请求、框架异步任务以及宿主已有的 Spring Kafka / Spring AMQP 组件会自动传播 W3C `traceparent`，业务代码不需要手动维护 `traceId`。
+
+Kafka 和 RabbitMQ 依赖仍是可选的：宿主使用哪个中间件，就只激活哪个适配器。适配器只增强已有的 `KafkaTemplate`、`RabbitTemplate` 和监听容器，不创建或替换连接、序列化及监听配置。
+
+本地开发不接 Collector 时无需配置。需要上报链路时只配置 OTLP 地址：
+
+```yaml
+spring:
+  application:
+    name: order-service
+
+management:
+  otlp:
+    tracing:
+      endpoint: http://otel-collector:4318/v1/traces
+  tracing:
+    sampling:
+      probability: 0.1
+```
+
+默认能力可按需关闭：
+
+```yaml
+api:
+  governance:
+    tracing:
+      enabled: true
+      async-context-propagation: true
+      kafka: true
+      rabbit: true
+```
+
+日志格式可使用 Spring Boot 的关联字段：
+
+```yaml
+logging:
+  pattern:
+    correlation: "[${spring.application.name:},%X{traceId:-},%X{spanId:-}] "
+```
+
+MQ 的 `traceparent`、`tracestate`、`baggage` 由框架写入消息 Header；业务仍应独立维护 `messageId` 和 `correlationId`，不要使用 `traceId` 做消费幂等。
+
+---
+
+## 十、依赖说明
 
 | 依赖 | 作用 | 是否可选 |
 |------|------|----------|
 | spring-boot-starter-aop | AOP + 核心容器 | 否 |
 | spring-web | @RestController 等 Web 注解 | 否 |
+| spring-boot-starter-actuator | Observation 与追踪自动装配 | 否 |
+| micrometer-tracing-bridge-otel | OpenTelemetry bridge | 否 |
+| opentelemetry-exporter-otlp | OTLP 链路上报 | 否 |
+| spring-kafka | Kafka 消息链路适配（宿主使用 Kafka 时激活） | 是 |
+| spring-rabbit | RabbitMQ 消息链路适配（宿主使用 RabbitMQ 时激活） | 是 |
 | spring-boot-configuration-processor | yml 配置元数据 | 是 |
 | spring-boot-starter-data-redis | Redis 限流 | 是 |
 
@@ -341,12 +431,14 @@ GET /api-governance/metrics/slow/all
 
 ---
 
-## 九、文档
+## 十一、文档
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md)：架构设计与维护迭代指南。
+- [ASYNC_ACTIONS.md](./ASYNC_ACTIONS.md)：异步方法生命周期插件完整契约。
+- [ASYNC_IMPLEMENTATION.md](./ASYNC_IMPLEMENTATION.md)：双切面、注册缓存、事件快照和调度实现原理。
 - 源码中各方法均附详细中文注释。
 
-## 十、构建
+## 十二、构建
 
 ```bash
 mvnw.cmd clean install     # Windows
@@ -354,4 +446,3 @@ mvnw.cmd clean install     # Windows
 ```
 
 ---
-

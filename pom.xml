@@ -58,6 +58,31 @@
             <artifactId>spring-web</artifactId>
         </dependency>
 
+        <!-- 分布式链路追踪：内置 OpenTelemetry bridge 与 OTLP 导出，宿主无需再拼装依赖 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-otel</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-otlp</artifactId>
+        </dependency>
+        <!-- 消息中间件仅用于编译条件适配器，不传递给未使用对应 MQ 的宿主 -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.amqp</groupId>
+            <artifactId>spring-rabbit</artifactId>
+            <optional>true</optional>
+        </dependency>
+
         <!-- 配置元数据生成（IDE 自动补全 yml 配置），可选 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

@@ -23,7 +23,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import java.lang.reflect.Method;
 
 /**
- * 唯一 AOP 切面入口 —— 整个治理框架只有这一个 {@code @Around} 通知。
+ * Controller 治理主切面 —— 整条 Controller 过滤器管道只有这一个
+ * {@code @Around} 通知。
  *
  * <h3>切点</h3>
  * <p>默认拦截所有 {@code @RestController} / {@code @Controller} 类中的请求映射方法，
