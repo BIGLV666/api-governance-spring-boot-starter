@@ -48,7 +48,7 @@
 ## 二、包结构
 
 ```
-org.example.apigovernancespringbootstarter
+io.github.biglv666.apigovernance
 ├── annotation        最小注解：RateLimit / Skip / NoLog
 ├── aspect            GovernanceAspect（Controller 治理主切面）
 ├── async             方法生命周期异步插件

@@ -31,9 +31,9 @@
 
 ```xml
 <dependency>
-    <groupId>io.github.yourname</groupId>
+    <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>0.1.0</version>
 </dependency>
 ```
 
@@ -446,3 +446,9 @@ mvnw.cmd clean install     # Windows
 ```
 
 ---
+
+---
+
+## 十三、许可证
+
+本项目采用 [Apache License 2.0](./LICENSE) 开源。

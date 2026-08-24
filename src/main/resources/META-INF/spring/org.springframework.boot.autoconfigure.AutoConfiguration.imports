@@ -1,4 +1,4 @@
-org.example.apigovernancespringbootstarter.config.ApiGovernanceAutoConfiguration
-org.example.apigovernancespringbootstarter.trace.ApiGovernanceTracingAutoConfiguration
-org.example.apigovernancespringbootstarter.trace.kafka.KafkaTracingAutoConfiguration
-org.example.apigovernancespringbootstarter.trace.rabbit.RabbitTracingAutoConfiguration
+io.github.biglv666.apigovernance.config.ApiGovernanceAutoConfiguration
+io.github.biglv666.apigovernance.trace.ApiGovernanceTracingAutoConfiguration
+io.github.biglv666.apigovernance.trace.kafka.KafkaTracingAutoConfiguration
+io.github.biglv666.apigovernance.trace.rabbit.RabbitTracingAutoConfiguration
