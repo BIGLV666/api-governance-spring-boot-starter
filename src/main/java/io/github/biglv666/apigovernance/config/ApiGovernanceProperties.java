@@ -22,12 +22,21 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *       algorithm: token-bucket     # token-bucket / sliding-window / custom
  *       default-limit: 100          # 全局默认限流阈值（-1 表示不限制）
  *       default-window: 1           # 全局默认窗口（秒）
+ *       fail-strategy: open         # 限流器故障降级：open=放行 / close=503 拒绝（作用于 Redis）
  *     metrics:
  *       window-size: 100            # 每个 API 保留的最近记录条数
  *       window-seconds: 300         # 记录保留时长（秒）
- *       max-apis: 1000              # 最大统计 API 数量
+ *       max-apis: 1000              # 最大统计的 API 数量
+ *       micrometer-enabled: true    # 指标桥接到 Micrometer
+ *     alert:
+ *       enabled: true               # 告警总开关
+ *       suppress-interval-ms: 10000 # 告警抑制窗口（毫秒）
+ *       webhook:
+ *         enabled: false            # 内置 Webhook 通知器
+ *         url: ""                   # webhook 目标地址
  *     management:
  *       enabled: true               # 管理接口开关
+ *       auth-token: ""              # 非空时启用管理接口令牌鉴权
  *     async:
  *       enabled: true               # 方法生命周期异步钩子开关
  *       core-pool-size: 2           # 独立线程池核心线程数
@@ -62,6 +71,9 @@ public class ApiGovernanceProperties {
 
     /** 方法生命周期异步钩子配置。 */
     private Async async = new Async();
+
+    /** 告警配置。 */
+    private Alert alert = new Alert();
 
     /** 分布式链路追踪配置。 */
     private Tracing tracing = new Tracing();
@@ -114,6 +126,14 @@ public class ApiGovernanceProperties {
 
     public void setAsync(Async async) {
         this.async = async;
+    }
+
+    public Alert getAlert() {
+        return alert;
+    }
+
+    public void setAlert(Alert alert) {
+        this.alert = alert;
     }
 
     public Tracing getTracing() {
@@ -199,6 +219,25 @@ public class ApiGovernanceProperties {
         /** 限流拒绝提示语。 */
         private String message = "请求过于频繁，请稍后重试";
 
+        /**
+         * 限流器故障降级策略（当前作用于 Redis 分布式限流）：
+         * {@code open} = 故障时放行（默认，可用性优先）；{@code close} = 故障时拒绝（503，配额优先）。
+         */
+        private String failStrategy = "open";
+
+        /**
+         * 获取限流器故障降级策略（归一化为小写，非法值回退 open）。
+         *
+         * @return "open" 或 "close"
+         */
+        public String getFailStrategy() {
+            return failStrategy == null ? "open" : failStrategy.trim().toLowerCase();
+        }
+
+        public void setFailStrategy(String failStrategy) {
+            this.failStrategy = failStrategy;
+        }
+
         public String getType() {
             return type;
         }
@@ -262,6 +301,17 @@ public class ApiGovernanceProperties {
         /** 最大统计的 API 数量（超限按 LRU 淘汰）。 */
         private int maxApis = 1000;
 
+        /** 是否将治理指标桥接到 Micrometer（存在 MeterRegistry Bean 时生效，默认开启）。 */
+        private boolean micrometerEnabled = true;
+
+        public boolean isMicrometerEnabled() {
+            return micrometerEnabled;
+        }
+
+        public void setMicrometerEnabled(boolean micrometerEnabled) {
+            this.micrometerEnabled = micrometerEnabled;
+        }
+
         public int getWindowSize() {
             return windowSize;
         }
@@ -298,6 +348,37 @@ public class ApiGovernanceProperties {
         /** 管理接口基础路径。 */
         private String basePath = "/api-governance";
 
+        /**
+         * 管理接口鉴权令牌。非空时启用鉴权：请求必须携带 {@link #authHeader} 指定的
+         * header 且值与令牌一致，否则返回 401。为空（默认）表示不启用鉴权。
+         * <p>生产环境建议通过环境变量注入，如 {@code auth-token: ${GOVERNANCE_TOKEN}}。
+         */
+        private String authToken = "";
+
+        /** 管理接口鉴权令牌的请求头名称（仅 {@link #authToken} 非空时生效）。 */
+        private String authHeader = "X-Governance-Token";
+
+        public String getAuthToken() {
+            return authToken;
+        }
+
+        public void setAuthToken(String authToken) {
+            this.authToken = authToken;
+        }
+
+        /** 判断管理接口鉴权是否启用（令牌非空白即启用）。 */
+        public boolean isAuthEnabled() {
+            return authToken != null && !authToken.trim().isEmpty();
+        }
+
+        public String getAuthHeader() {
+            return authHeader;
+        }
+
+        public void setAuthHeader(String authHeader) {
+            this.authHeader = authHeader;
+        }
+
         public boolean isEnabled() {
             return enabled;
         }
@@ -312,6 +393,101 @@ public class ApiGovernanceProperties {
 
         public void setBasePath(String basePath) {
             this.basePath = basePath;
+        }
+    }
+
+    /**
+     * 告警配置（慢方法 / 限流拒绝 / 限流器故障三类事件）。
+     */
+    public static class Alert {
+
+        /** 告警总开关（关闭时不创建告警分发器，已注册的通知器不会收到事件）。 */
+        private boolean enabled = true;
+
+        /**
+         * 告警抑制窗口（毫秒）：同一 {@code (告警类型, apiKey)} 在窗口内只分发一次，
+         * 防止告警风暴。0 表示不抑制（不推荐，慢接口会被每个慢请求触发一次）。
+         */
+        private long suppressIntervalMs = 10000L;
+
+        /** 内置 Webhook 通知器配置。 */
+        private Webhook webhook = new Webhook();
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public long getSuppressIntervalMs() {
+            return suppressIntervalMs;
+        }
+
+        public void setSuppressIntervalMs(long suppressIntervalMs) {
+            this.suppressIntervalMs = suppressIntervalMs;
+        }
+
+        public Webhook getWebhook() {
+            return webhook;
+        }
+
+        public void setWebhook(Webhook webhook) {
+            this.webhook = webhook;
+        }
+    }
+
+    /**
+     * 内置 Webhook 告警通知器配置（基于 JDK HttpClient，零额外依赖）。
+     */
+    public static class Webhook {
+
+        /** 是否启用 Webhook 通知器。 */
+        private boolean enabled = false;
+
+        /** Webhook 目标地址（POST JSON）。 */
+        private String url = "";
+
+        /** 单次请求超时（毫秒）。 */
+        private long timeoutMs = 3000L;
+
+        /**
+         * 可选的鉴权令牌：非空时以 {@code X-Governance-Token} 请求头携带，
+         * 供接收端校验来源。请勿把令牌写入日志。
+         */
+        private String secretToken = "";
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getUrl() {
+            return url;
+        }
+
+        public void setUrl(String url) {
+            this.url = url;
+        }
+
+        public long getTimeoutMs() {
+            return timeoutMs;
+        }
+
+        public void setTimeoutMs(long timeoutMs) {
+            this.timeoutMs = timeoutMs;
+        }
+
+        public String getSecretToken() {
+            return secretToken;
+        }
+
+        public void setSecretToken(String secretToken) {
+            this.secretToken = secretToken;
         }
     }
 

@@ -6,6 +6,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 内存指标注册表 —— 集中管理所有 API 的运行时指标。
@@ -22,6 +26,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class MetricsRegistry {
 
+    private static final Logger log = LoggerFactory.getLogger(MetricsRegistry.class);
+
     /** 最大管理的 API 数量（兜底上限）。 */
     private final int maxApis;
 
@@ -34,6 +40,9 @@ public class MetricsRegistry {
     /** apiKey -> 指标 的并发映射。 */
     private final Map<String, ApiMetrics> registry = new ConcurrentHashMap<>();
 
+    /** 指标事件监听器（如 Micrometer 桥接、告警分发），写时复制保证并发安全遍历。 */
+    private final CopyOnWriteArrayList<MetricsEventListener> listeners = new CopyOnWriteArrayList<>();
+
     /**
      * 构造指标注册表。
      *
@@ -45,6 +54,20 @@ public class MetricsRegistry {
         this.maxApis = Math.max(1, maxApis);
         this.windowSize = Math.max(1, windowSize);
         this.windowMillis = windowMillis;
+    }
+
+    /**
+     * 注册指标事件监听器。
+     *
+     * <p>监听器在请求线程上被同步回调，任何监听器抛出的异常都会被吞掉（记 warn 日志），
+     * 绝不影响治理管道与其他监听器。重复注册同一实例会重复回调，请勿重复注册。
+     *
+     * @param listener 监听器实例
+     */
+    public void addListener(MetricsEventListener listener) {
+        if (listener != null) {
+            listeners.add(listener);
+        }
     }
 
     /**
@@ -70,6 +93,15 @@ public class MetricsRegistry {
     public void recordResult(String apiKey, long elapsedMs, boolean success, boolean slow,
                              String httpMethod, String path, String error) {
         getOrCreate(apiKey).recordResult(elapsedMs, success, slow, httpMethod, path, error);
+        // 逐个通知监听器并隔离异常：单个监听器故障不能拖垮其他监听器与业务请求
+        for (MetricsEventListener listener : listeners) {
+            try {
+                listener.onResult(apiKey, elapsedMs, success, slow, httpMethod, path, error);
+            } catch (Exception e) {
+                log.warn("指标事件监听器执行异常 - listener: {}, 错误: {}",
+                        listener.getClass().getName(), e.getMessage());
+            }
+        }
     }
 
     /**
@@ -82,6 +114,14 @@ public class MetricsRegistry {
      */
     public void recordReject(String apiKey, String httpMethod, String path, String reason) {
         getOrCreate(apiKey).recordReject(httpMethod, path, reason);
+        for (MetricsEventListener listener : listeners) {
+            try {
+                listener.onReject(apiKey, httpMethod, path, reason);
+            } catch (Exception e) {
+                log.warn("指标事件监听器执行异常 - listener: {}, 错误: {}",
+                        listener.getClass().getName(), e.getMessage());
+            }
+        }
     }
 
     /**

@@ -2,7 +2,6 @@
 
 `@AsyncAction` / `@AsyncHandler` 为 Spring Bean 的公开方法提供旁路异步钩子。目标方法本身仍在调用线程同步执行；框架只在其生命周期阶段提交附加任务。
 
-内部注册、双切面嵌套和调度代码说明见 [ASYNC_IMPLEMENTATION.md](ASYNC_IMPLEMENTATION.md)。
 
 ## 使用方式
 

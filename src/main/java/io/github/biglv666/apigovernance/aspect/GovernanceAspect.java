@@ -18,9 +18,17 @@ import org.springframework.aop.support.AopUtils;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.core.annotation.Order;
+import org.springframework.core.DefaultParameterNameDiscoverer;
+import org.springframework.core.ParameterNameDiscoverer;
+import org.springframework.expression.Expression;
+import org.springframework.expression.ExpressionParser;
+import org.springframework.expression.spel.standard.SpelExpressionParser;
+import org.springframework.expression.spel.support.SimpleEvaluationContext;
 import org.springframework.web.bind.annotation.RequestMapping;
 
 import java.lang.reflect.Method;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 
 /**
  * Controller 治理主切面 —— 整条 Controller 过滤器管道只有这一个
@@ -63,6 +71,15 @@ public class GovernanceAspect {
 
     /** 全局配置。 */
     private final ApiGovernanceProperties properties;
+
+    /** SpEL 表达式解析器（限流键）。 */
+    private final ExpressionParser rateLimitKeyParser = new SpelExpressionParser();
+
+    /** 参数名发现器：优先编译期 -parameters，退回字节码调试信息。 */
+    private final ParameterNameDiscoverer parameterNameDiscoverer = new DefaultParameterNameDiscoverer();
+
+    /** 限流键表达式缓存（key = Method）：编译结果与参数名按方法缓存，避免每请求重复解析。 */
+    private final Map<Method, RateLimitKeyExpression> rateLimitKeyCache = new ConcurrentHashMap<>();
 
     /**
      * 构造切面。
@@ -197,9 +214,95 @@ public class GovernanceAspect {
             context.setRateLimitEnabled(true);
             context.setRateLimit(limit);
             context.setWindow(window);
+            // 解析参数维度限流键后缀（@RateLimit.key SpEL），失败时自动回退接口级限流
+            String keyExpression = methodAnn != null ? methodAnn.key()
+                    : (classAnn != null ? classAnn.key() : "");
+            applyRateLimitKey(method, keyExpression, context);
             if (log.isDebugEnabled()) {
-                log.debug("启用限流 - API: {}, limit: {}/{}(秒)", context.getApiKey(), limit, window);
+                log.debug("启用限流 - API: {}, limit: {}/{}(秒), keySuffix: {}",
+                        context.getApiKey(), limit, window, context.getRateLimitKeySuffix());
             }
+        }
+    }
+
+    /**
+     * 解析 {@code @RateLimit(key = "...")} SpEL 表达式并写入上下文后缀。
+     *
+     * <p>表达式按 Method 缓存编译结果；求值使用受限的 {@link SimpleEvaluationContext}
+     * （只读变量绑定，不允许类型引用 / 构造器 / Bean 引用），可用变量为方法参数名与
+     * {@code #apiKey}。解析或求值任何一步失败都回退为接口级限流（不写后缀），仅记 warn 日志。
+     *
+     * @param method       被拦截方法
+     * @param keyExpression 注解声明的 SpEL 表达式（空表示不使用参数维度限流）
+     * @param context      过滤器上下文
+     */
+    private void applyRateLimitKey(Method method, String keyExpression, FilterContext context) {
+        if (keyExpression == null || keyExpression.isBlank()) {
+            return;
+        }
+        try {
+            RateLimitKeyExpression compiled = rateLimitKeyCache.computeIfAbsent(method,
+                    m -> compileRateLimitKey(m, keyExpression));
+            if (compiled.expression == null) {
+                // 编译失败的表达式：已在编译时记过 warn，直接回退接口级限流
+                return;
+            }
+            SimpleEvaluationContext evalContext = SimpleEvaluationContext.forReadOnlyDataBinding().build();
+            Object[] args = context.getArgs();
+            String[] paramNames = compiled.paramNames;
+            if (paramNames != null) {
+                for (int i = 0; i < paramNames.length && i < args.length; i++) {
+                    evalContext.setVariable(paramNames[i], args[i]);
+                }
+            } else if (log.isDebugEnabled()) {
+                log.debug("无法发现方法参数名（编译时未启用 -parameters），SpEL 仅可用 #apiKey - method: {}",
+                        method.getName());
+            }
+            evalContext.setVariable("apiKey", context.getApiKey());
+            Object value = compiled.expression.getValue(evalContext);
+            if (value != null) {
+                String suffix = String.valueOf(value).trim();
+                if (!suffix.isEmpty()) {
+                    context.setRateLimitKeySuffix(suffix);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("限流键 SpEL 求值失败，回退接口级限流 - API: {}, key: '{}', 错误: {}",
+                    context.getApiKey(), keyExpression, e.getMessage());
+        }
+    }
+
+    /**
+     * 编译限流键表达式并尝试发现参数名（仅首次调用，结果按 Method 缓存）。
+     * 编译失败时返回 expression 为 null 的占位对象，避免每请求重复解析。
+     */
+    private RateLimitKeyExpression compileRateLimitKey(Method method, String keyExpression) {
+        try {
+            Expression expression = rateLimitKeyParser.parseExpression(keyExpression);
+            String[] paramNames = parameterNameDiscoverer.getParameterNames(method);
+            return new RateLimitKeyExpression(expression, paramNames);
+        } catch (Exception e) {
+            log.warn("限流键 SpEL 解析失败，忽略参数维度限流 - method: {}, key: '{}', 错误: {}",
+                    method.getName(), keyExpression, e.getMessage());
+            return new RateLimitKeyExpression(null, null);
+        }
+    }
+
+    /**
+     * 限流键表达式的按方法缓存条目：编译后的表达式与参数名。
+     * {@code expression == null} 表示编译失败（占位，永久回退接口级限流）。
+     */
+    private static final class RateLimitKeyExpression {
+
+        /** 编译后的 SpEL 表达式；null 表示编译失败。 */
+        final Expression expression;
+
+        /** 方法参数名（可能为 null：编译期未启用 -parameters 且无调试信息）。 */
+        final String[] paramNames;
+
+        RateLimitKeyExpression(Expression expression, String[] paramNames) {
+            this.expression = expression;
+            this.paramNames = paramNames;
         }
     }
 

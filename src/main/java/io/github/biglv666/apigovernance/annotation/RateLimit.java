@@ -65,4 +65,32 @@ public @interface RateLimit {
      * @return 时间窗口（秒）
      */
     int window() default -1;
+
+    /**
+     * 限流键 SpEL 表达式（可选），用于「参数维度」限流。
+     *
+     * <p>表达式的求值结果会作为限流键的后缀拼接到接口键之后
+     * （最终键 = {@code 全限定类名#方法名:表达式结果}），使不同参数值各自拥有独立配额。
+     * 可用变量：方法参数（按参数名引用，如 {@code #userId}）与 {@code #apiKey}。
+     *
+     * <h3>使用示例</h3>
+     * <pre>
+     * &#64;GetMapping("/users/{id}")
+     * &#64;RateLimit(limit = 10, key = "#id")   // 每个 id 独立 10 次/窗口
+     * public User get(@PathVariable Long id) { ... }
+     * </pre>
+     *
+     * <h3>安全与降级</h3>
+     * <ul>
+     *   <li>表达式在受限的 {@code SimpleEvaluationContext} 中求值：不允许类型引用、
+     *       构造器调用与 Bean 引用，只能读取参数变量；</li>
+     *   <li>表达式解析或求值失败时，回退为接口级限流并记录 warn 日志，不影响业务。</li>
+     * </ul>
+     *
+     * <p>需要更复杂的键策略（如结合请求头、安全上下文）时，建议直接实现
+     * {@code RateLimitKeyResolver} Bean，本属性只覆盖最常见的参数维度场景。
+     *
+     * @return SpEL 表达式；空字符串（默认）表示不做参数维度限流
+     */
+    String key() default "";
 }

@@ -1,5 +1,8 @@
 package io.github.biglv666.apigovernance.config;
 
+import io.github.biglv666.apigovernance.alert.GovernanceAlertNotifier;
+import io.github.biglv666.apigovernance.alert.internal.AlertDispatcher;
+import io.github.biglv666.apigovernance.alert.webhook.WebhookAlertNotifier;
 import io.github.biglv666.apigovernance.async.aspect.AsyncActionAspect;
 import io.github.biglv666.apigovernance.async.internal.AsyncDispatcher;
 import io.github.biglv666.apigovernance.async.internal.AsyncEventFactory;
@@ -23,18 +26,25 @@ import io.github.biglv666.apigovernance.filter.impl.MetadataCollectorFilter;
 import io.github.biglv666.apigovernance.filter.impl.RateLimitFilter;
 import io.github.biglv666.apigovernance.filter.impl.SlowMethodFilter;
 import io.github.biglv666.apigovernance.filter.impl.TrafficStatisticsFilter;
+import io.github.biglv666.apigovernance.management.GovernanceManagementAuthFilter;
 import io.github.biglv666.apigovernance.management.GovernanceManagementController;
+import io.github.biglv666.apigovernance.metrics.MetricsEventListener;
 import io.github.biglv666.apigovernance.metrics.MetricsRegistry;
+import io.github.biglv666.apigovernance.metrics.micrometer.MicrometerMetricsEventListener;
 import io.github.biglv666.apigovernance.ratelimit.DefaultRateLimitKeyResolver;
 import io.github.biglv666.apigovernance.ratelimit.RateLimitAlgorithm;
 import io.github.biglv666.apigovernance.ratelimit.RateLimitKeyResolver;
+import io.github.biglv666.apigovernance.ratelimit.RateLimitRejectHandler;
 import io.github.biglv666.apigovernance.ratelimit.RateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.RateLimitStrategy;
 import io.github.biglv666.apigovernance.ratelimit.StrategyRateLimiter;
+import io.github.biglv666.apigovernance.ratelimit.FailSafeRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.local.SlidingWindowRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.local.TokenBucketRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.redis.RedisSlidingWindowRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.redis.RedisTokenBucketRateLimiter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
@@ -43,9 +53,11 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.EnableAspectJAutoProxy;
+import org.springframework.core.Ordered;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.util.List;
@@ -75,16 +87,91 @@ public class ApiGovernanceAutoConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(ApiGovernanceAutoConfiguration.class);
 
-    // ==================== 内存指标 ====================
+    // ==================== 内存指标与事件监听 ====================
 
     /**
      * 内存指标注册表（有界滑动窗口，保证内存不膨胀）。
+     *
+     * <p>创建时自动收集容器内所有 {@link MetricsEventListener} Bean（内置的 Micrometer
+     * 桥接、告警分发器，以及用户自定义监听器），注册为事件监听器。
      */
     @Bean
     @ConditionalOnMissingBean
-    public MetricsRegistry metricsRegistry(ApiGovernanceProperties properties) {
+    public MetricsRegistry metricsRegistry(ApiGovernanceProperties properties,
+                                           ObjectProvider<MetricsEventListener> eventListeners) {
         ApiGovernanceProperties.Metrics m = properties.getMetrics();
-        return new MetricsRegistry(m.getMaxApis(), m.getWindowSize(), m.getWindowSeconds() * 1000L);
+        MetricsRegistry registry = new MetricsRegistry(m.getMaxApis(), m.getWindowSize(),
+                m.getWindowSeconds() * 1000L);
+        eventListeners.orderedStream().forEach(registry::addListener);
+        return registry;
+    }
+
+    // ==================== Micrometer 指标桥接 ====================
+
+    /**
+     * Micrometer 指标桥接监听器：把治理事件同步为标准 Micrometer Counter / Timer，
+     * 供 /actuator/prometheus 等标准生态采集。容器中没有 MeterRegistry 时本 Bean 为空转实现。
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "api.governance.metrics", name = "micrometer-enabled",
+            havingValue = "true", matchIfMissing = true)
+    public MicrometerMetricsEventListener micrometerMetricsEventListener(
+            ObjectProvider<MeterRegistry> meterRegistry) {
+        return new MicrometerMetricsEventListener(meterRegistry.getIfAvailable());
+    }
+
+    /**
+     * 「统计 API 数量」Gauge：直接从内存注册表读取，随 /actuator/metrics 暴露。
+     * 容器中没有 MeterRegistry 时不注册（返回 NullBean）。
+     */
+    @Bean(name = "apiGovernanceTrackedApisGauge")
+    @ConditionalOnProperty(prefix = "api.governance.metrics", name = "micrometer-enabled",
+            havingValue = "true", matchIfMissing = true)
+    public Gauge apiGovernanceTrackedApisGauge(ObjectProvider<MeterRegistry> meterRegistry,
+                                               MetricsRegistry metricsRegistry) {
+        MeterRegistry registry = meterRegistry.getIfAvailable();
+        if (registry == null) {
+            return null;
+        }
+        return Gauge.builder(MicrometerMetricsEventListener.METRIC_APIS_TRACKED,
+                        metricsRegistry, MetricsRegistry::size)
+                .description("Number of APIs currently tracked by api-governance")
+                .register(registry);
+    }
+
+    // ==================== 告警 ====================
+
+    /**
+     * 内置 Webhook 告警通知器：仅在显式启用且配置了 URL 时创建。
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "api.governance.alert.webhook", name = "enabled",
+            havingValue = "true")
+    public GovernanceAlertNotifier webhookAlertNotifier(ApiGovernanceProperties properties) {
+        ApiGovernanceProperties.Webhook webhook = properties.getAlert().getWebhook();
+        if (webhook.getUrl() == null || webhook.getUrl().trim().isEmpty()) {
+            throw new IllegalStateException(
+                    "api.governance.alert.webhook.enabled=true 但未配置 webhook.url，请补充目标地址");
+        }
+        log.info("启用 Webhook 告警通知器");
+        return new WebhookAlertNotifier(webhook.getUrl().trim(), webhook.getTimeoutMs(),
+                webhook.getSecretToken());
+    }
+
+    /**
+     * 告警分发器：把指标事件转换为告警并分发给所有通知器（含告警风暴抑制）。
+     * 告警关闭或无通知器时为空转实现（零开销）。
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "api.governance.alert", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public AlertDispatcher alertDispatcher(ApiGovernanceProperties properties,
+                                           ObjectProvider<GovernanceAlertNotifier> notifiers) {
+        List<GovernanceAlertNotifier> notifierList = notifiers.orderedStream().toList();
+        log.info("配置告警分发器 - 通知器数量: {}, 抑制窗口: {}ms",
+                notifierList.size(), properties.getAlert().getSuppressIntervalMs());
+        return new AlertDispatcher(notifierList, properties.getAlert().getSuppressIntervalMs(),
+                properties.getLog().getSlowThresholdMs());
     }
 
     // ==================== 限流器插件 ====================
@@ -144,8 +231,10 @@ public class ApiGovernanceAutoConfiguration {
     public RateLimitFilter rateLimitFilter(ObjectProvider<RateLimiter> rateLimiter,
                                            MetricsRegistry metricsRegistry,
                                            ApiGovernanceProperties properties,
-                                           RateLimitKeyResolver keyResolver) {
-        return new RateLimitFilter(rateLimiter.getIfAvailable(), metricsRegistry, properties, keyResolver);
+                                           RateLimitKeyResolver keyResolver,
+                                           ObjectProvider<RateLimitRejectHandler> rejectHandlers) {
+        return new RateLimitFilter(rateLimiter.getIfAvailable(), metricsRegistry, properties,
+                keyResolver, rejectHandlers.getIfAvailable());
     }
 
     @Bean
@@ -277,11 +366,36 @@ public class ApiGovernanceAutoConfiguration {
                 filterChain, metricsRegistry);
     }
 
+    /**
+     * 管理接口轻量鉴权过滤器：仅当配置了 {@code management.auth-token} 时启用拦截；
+     * 未配置令牌时注册但禁用（行为与未注册一致，保持向后兼容）。
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "api.governance.management", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public FilterRegistrationBean<GovernanceManagementAuthFilter> governanceManagementAuthFilter(
+            ApiGovernanceProperties properties) {
+        ApiGovernanceProperties.Management management = properties.getManagement();
+        GovernanceManagementAuthFilter filter = new GovernanceManagementAuthFilter(properties);
+        FilterRegistrationBean<GovernanceManagementAuthFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.addUrlPatterns(management.getBasePath() + "/*");
+        registration.setEnabled(management.isAuthEnabled());
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 200);
+        if (management.isAuthEnabled()) {
+            log.info("管理接口鉴权已启用 - header: {}", management.getAuthHeader());
+        }
+        return registration;
+    }
+
     // ==================== Redis 限流（可选依赖） ====================
 
     /**
      * Redis 限流器装配：仅当 {@code StringRedisTemplate} 在类路径且配置 type=redis 时生效。
      * 「Redis 只封装」—— 内部实现仅为 Redis + Lua 脚本的封装，不掺杂业务逻辑。
+     *
+     * <p>统一包装 {@link FailSafeRateLimiter}：Redis 故障时按
+     * {@code api.governance.rate-limit.fail-strategy}（open=放行 / close=拒绝）降级，
+     * 并触发 {@code RATE_LIMITER_FAILURE} 告警（若告警已启用）。
      */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(name = "org.springframework.data.redis.core.StringRedisTemplate")
@@ -292,14 +406,19 @@ public class ApiGovernanceAutoConfiguration {
         @ConditionalOnProperty(prefix = "api.governance.rate-limit", name = "type",
                 havingValue = "redis")
         public RateLimiter redisRateLimiter(ApiGovernanceProperties properties,
-                                            StringRedisTemplate redisTemplate) {
+                                            StringRedisTemplate redisTemplate,
+                                            ObjectProvider<AlertDispatcher> alertDispatcher) {
             RateLimitAlgorithm algorithm = RateLimitAlgorithm.fromCode(properties.getRateLimit().getAlgorithm());
+            RateLimiter delegate;
             if (algorithm == RateLimitAlgorithm.SLIDING_WINDOW) {
                 log.info("配置限流器: Redis 滑动窗口");
-                return new RedisSlidingWindowRateLimiter(redisTemplate);
+                delegate = new RedisSlidingWindowRateLimiter(redisTemplate);
+            } else {
+                log.info("配置限流器: Redis 令牌桶");
+                delegate = new RedisTokenBucketRateLimiter(redisTemplate);
             }
-            log.info("配置限流器: Redis 令牌桶");
-            return new RedisTokenBucketRateLimiter(redisTemplate);
+            boolean failClose = "close".equals(properties.getRateLimit().getFailStrategy());
+            return new FailSafeRateLimiter(delegate, failClose, alertDispatcher.getIfAvailable());
         }
     }
 }

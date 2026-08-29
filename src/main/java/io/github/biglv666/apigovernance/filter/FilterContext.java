@@ -50,6 +50,13 @@ public class FilterContext {
     /** 本次请求是否需要执行限流。 */
     private boolean rateLimitEnabled = false;
 
+    /**
+     * 限流键后缀（可选）：由 {@code @RateLimit(key = "...")} 的 SpEL 表达式求值得出，
+     * 默认键解析器会将其拼接为 {@code apiKey:后缀}，实现参数维度限流。
+     * 为 null 表示不使用参数维度限流。
+     */
+    private String rateLimitKeySuffix;
+
     /** 本次请求是否输出日志（默认开启，可由 @NoLog 关闭）。 */
     private boolean logEnabled = true;
 
@@ -152,6 +159,14 @@ public class FilterContext {
 
     public void setRateLimitEnabled(boolean rateLimitEnabled) {
         this.rateLimitEnabled = rateLimitEnabled;
+    }
+
+    public String getRateLimitKeySuffix() {
+        return rateLimitKeySuffix;
+    }
+
+    public void setRateLimitKeySuffix(String rateLimitKeySuffix) {
+        this.rateLimitKeySuffix = rateLimitKeySuffix;
     }
 
     // ==================== 日志配置 ====================

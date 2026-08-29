@@ -80,23 +80,19 @@ public class RedisSlidingWindowRateLimiter implements RateLimiter {
 
     @Override
     public boolean tryAcquire(String key, int limit, int windowSeconds) {
+        // 异常不在此处吞掉：由自动配置包装的 FailSafeRateLimiter 统一按
+        // fail-strategy（open=放行 / close=拒绝）处理降级与告警
         List<String> keys = Collections.singletonList(KEY_PREFIX + key);
-        try {
-            String requestId = System.currentTimeMillis() + "-" + Thread.currentThread().getId();
-            Long result = redisTemplate.execute(
-                    rateLimitScript,
-                    keys,
-                    String.valueOf(limit),
-                    String.valueOf(windowSeconds),
-                    String.valueOf(System.currentTimeMillis()),
-                    requestId
-            );
-            return result != null && result == 1L;
-        } catch (Exception e) {
-            // 降级策略：Redis 异常时放行
-            log.error("Redis 滑动窗口限流执行失败 - key: {}, 错误: {}", key, e.getMessage(), e);
-            return true;
-        }
+        String requestId = System.currentTimeMillis() + "-" + Thread.currentThread().getId();
+        Long result = redisTemplate.execute(
+                rateLimitScript,
+                keys,
+                String.valueOf(limit),
+                String.valueOf(windowSeconds),
+                String.valueOf(System.currentTimeMillis()),
+                requestId
+        );
+        return result != null && result == 1L;
     }
 
     @Override

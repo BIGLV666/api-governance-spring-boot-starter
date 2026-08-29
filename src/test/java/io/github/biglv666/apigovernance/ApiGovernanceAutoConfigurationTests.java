@@ -1,5 +1,7 @@
 package io.github.biglv666.apigovernance;
 
+import io.github.biglv666.apigovernance.alert.internal.AlertDispatcher;
+import io.github.biglv666.apigovernance.alert.webhook.WebhookAlertNotifier;
 import io.github.biglv666.apigovernance.aspect.GovernanceAspect;
 import io.github.biglv666.apigovernance.async.aspect.AsyncActionAspect;
 import io.github.biglv666.apigovernance.async.internal.AsyncHandlerRegistry;
@@ -8,6 +10,7 @@ import io.github.biglv666.apigovernance.config.ApiGovernanceAutoConfiguration;
 import io.github.biglv666.apigovernance.filter.FilterChain;
 import io.github.biglv666.apigovernance.management.GovernanceManagementController;
 import io.github.biglv666.apigovernance.metrics.MetricsRegistry;
+import io.github.biglv666.apigovernance.metrics.micrometer.MicrometerMetricsEventListener;
 import io.github.biglv666.apigovernance.ratelimit.DefaultRateLimitKeyResolver;
 import io.github.biglv666.apigovernance.ratelimit.RateLimitKeyResolver;
 import io.github.biglv666.apigovernance.ratelimit.RateLimiter;
@@ -15,9 +18,11 @@ import io.github.biglv666.apigovernance.ratelimit.RateLimitStrategy;
 import io.github.biglv666.apigovernance.ratelimit.StrategyRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.local.SlidingWindowRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.local.TokenBucketRateLimiter;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.core.annotation.AnnotationAwareOrderComparator;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -133,5 +138,77 @@ class ApiGovernanceAutoConfigurationTests {
         RateLimitKeyResolver custom = context -> "custom-key";
         runner.withBean(RateLimitKeyResolver.class, () -> custom)
                 .run(ctx -> assertThat(ctx.getBean(RateLimitKeyResolver.class)).isSameAs(custom));
+    }
+
+    // ==================== 0.2.0 新特性装配 ====================
+
+    @Test
+    void alertDispatcherPresentByDefaultAndListenersRegistered() {
+        runner.run(ctx -> {
+            assertThat(ctx).hasSingleBean(AlertDispatcher.class);
+            // 分发器是指标事件监听器，自动注册到内存指标注册表
+            MetricsRegistry registry = ctx.getBean(MetricsRegistry.class);
+            registry.recordReject("api", "GET", "/x", "reason");
+            // 无通知器时为空转，不抛异常即通过
+            assertThat(registry.size()).isEqualTo(1);
+        });
+    }
+
+    @Test
+    void alertCanBeDisabledIndependently() {
+        runner.withPropertyValues("api.governance.alert.enabled=false")
+                .run(ctx -> {
+                    assertThat(ctx).doesNotHaveBean(AlertDispatcher.class);
+                    assertThat(ctx).hasSingleBean(GovernanceAspect.class);
+                });
+    }
+
+    @Test
+    void webhookNotifierRequiresUrl() {
+        runner.withPropertyValues("api.governance.alert.webhook.enabled=true")
+                .run(ctx -> assertThat(ctx).hasFailed());
+        runner.withPropertyValues(
+                        "api.governance.alert.webhook.enabled=true",
+                        "api.governance.alert.webhook.url=https://example.com/hook")
+                .run(ctx -> assertThat(ctx).hasSingleBean(WebhookAlertNotifier.class));
+    }
+
+    @Test
+    void micrometerListenerBridgesEvents() {
+        runner.withBean(SimpleMeterRegistry.class, SimpleMeterRegistry::new)
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(MicrometerMetricsEventListener.class);
+                    ctx.getBean(MetricsRegistry.class)
+                            .recordResult("api", 100, true, false, "GET", "/x", null);
+                    SimpleMeterRegistry meterRegistry = ctx.getBean(SimpleMeterRegistry.class);
+                    assertThat(meterRegistry.counter("api.governance.requests",
+                            "api", "api", "method", "GET", "outcome", "success").count()).isEqualTo(1.0);
+                });
+    }
+
+    @Test
+    void micrometerBridgeCanBeDisabled() {
+        runner.withPropertyValues("api.governance.metrics.micrometer-enabled=false")
+                .run(ctx -> assertThat(ctx).doesNotHaveBean(MicrometerMetricsEventListener.class));
+    }
+
+    @Test
+    void authFilterDisabledWithoutToken() {
+        runner.run(ctx -> {
+            FilterRegistrationBean<?> registration =
+                    ctx.getBean("governanceManagementAuthFilter", FilterRegistrationBean.class);
+            assertThat(registration.isEnabled()).isFalse();
+        });
+    }
+
+    @Test
+    void authFilterEnabledWithToken() {
+        runner.withPropertyValues("api.governance.management.auth-token=secret")
+                .run(ctx -> {
+                    FilterRegistrationBean<?> registration =
+                            ctx.getBean("governanceManagementAuthFilter", FilterRegistrationBean.class);
+                    assertThat(registration.isEnabled()).isTrue();
+                    assertThat(registration.getUrlPatterns()).contains("/api-governance/*");
+                });
     }
 }

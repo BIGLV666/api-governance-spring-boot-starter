@@ -93,21 +93,17 @@ public class RedisTokenBucketRateLimiter implements RateLimiter {
 
     @Override
     public boolean tryAcquire(String key, int limit, int windowSeconds) {
+        // 异常不在此处吞掉：由自动配置包装的 FailSafeRateLimiter 统一按
+        // fail-strategy（open=放行 / close=拒绝）处理降级与告警
         List<String> keys = Collections.singletonList(KEY_PREFIX + key);
-        try {
-            Long result = redisTemplate.execute(
-                    rateLimitScript,
-                    keys,
-                    String.valueOf(limit),
-                    String.valueOf(Math.max(1, windowSeconds)),
-                    String.valueOf(System.currentTimeMillis())
-            );
-            return result != null && result == 1L;
-        } catch (Exception e) {
-            // 降级策略：Redis 异常时放行，避免限流组件拖垮业务
-            log.error("Redis 令牌桶限流执行失败 - key: {}, 错误: {}", key, e.getMessage(), e);
-            return true;
-        }
+        Long result = redisTemplate.execute(
+                rateLimitScript,
+                keys,
+                String.valueOf(limit),
+                String.valueOf(Math.max(1, windowSeconds)),
+                String.valueOf(System.currentTimeMillis())
+        );
+        return result != null && result == 1L;
     }
 
     @Override

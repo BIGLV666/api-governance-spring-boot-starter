@@ -12,7 +12,7 @@
 
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
     <name>API Governance Spring Boot Starter</name>
     <description>轻量级、插件化的 API 治理 Spring Boot Starter，提供 AOP 拦截、过滤器管道、限流、指标和管理接口。</description>
     <url>https://github.com/BIGLV666/api-governance-spring-boot-starter</url>
@@ -55,6 +55,12 @@
             <groupId>org.springframework</groupId>
             <artifactId>spring-web</artifactId>
         </dependency>
+        <!-- 管理接口鉴权过滤器仅编译期需要 Servlet API；运行期由宿主容器提供（provided） -->
+        <dependency>
+            <groupId>jakarta.servlet</groupId>
+            <artifactId>jakarta.servlet-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
@@ -96,6 +102,18 @@
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <!-- 让 jar manifest 携带 Implementation-Version，管理接口 /status 读取展示 -->
+                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>

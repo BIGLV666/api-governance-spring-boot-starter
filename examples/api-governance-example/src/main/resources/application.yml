@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: api-governance-example
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus   # 暴露 /actuator/prometheus 供 Micrometer 指标演示
+
+api:
+  governance:
+    enabled: true
+    log:
+      enabled: true
+      slow-threshold-ms: 1000        # 慢方法阈值：/api/slow（1.5s）会触发告警
+    rate-limit:
+      type: local
+      algorithm: token-bucket
+      default-limit: -1              # 全局默认不限流，限流全部由注解声明
+      fail-strategy: open            # Redis 故障时放行（本示例用 local，仅作展示）
+    metrics:
+      window-size: 100
+      window-seconds: 300
+      max-apis: 1000
+      micrometer-enabled: true       # 治理指标桥接到 /actuator/prometheus
+    alert:
+      enabled: true
+      suppress-interval-ms: 10000    # 同 (类型, apiKey) 10 秒只告警一次
+      webhook:
+        enabled: false               # 演示用 ConsoleAlertNotifier，如需 webhook：
+        # enabled: true
+        # url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+    management:
+      enabled: true
+      base-path: /api-governance
+      auth-token: demo-token         # 非空即启用管理接口鉴权；生产建议 ${GOVERNANCE_TOKEN} 注入
+      auth-header: X-Governance-Token
+    async:
+      enabled: true

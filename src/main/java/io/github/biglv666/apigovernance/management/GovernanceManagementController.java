@@ -86,9 +86,11 @@ public class GovernanceManagementController {
      */
     @GetMapping("/status")
     public Map<String, Object> status() {
+        // 版本号取自 jar manifest（maven-jar-plugin 生成），开发环境类路径下可能为 null
+        String version = GovernanceManagementController.class.getPackage().getImplementationVersion();
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("enabled", properties.isEnabled());
-        body.put("version", "1.0.0");
+        body.put("version", version != null ? version : "unknown");
         body.put("rateLimiter", rateLimiter != null ? rateLimiter.getName() : "none");
         body.put("preFilterCount", filterChain.getPreFilterCount());
         body.put("postFilterCount", filterChain.getPostFilterCount());
