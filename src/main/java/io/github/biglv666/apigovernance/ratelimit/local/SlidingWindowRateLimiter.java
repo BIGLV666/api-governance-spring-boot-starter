@@ -1,11 +1,8 @@
 package io.github.biglv666.apigovernance.ratelimit.local;
 
-import io.github.biglv666.apigovernance.ratelimit.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
 /**
@@ -22,28 +19,20 @@ import java.util.concurrent.ConcurrentLinkedDeque;
  * <ul>
  *   <li>精确限流：严格约束时间窗口内的请求数；</li>
  *   <li>单键内存占用 = 窗口内请求数（有自然上界 {@code limit}）；</li>
- *   <li>键数量设置最大上限 + LRU 淘汰，防止映射膨胀。</li>
+ *   <li>键数量上限可配置（{@code api.governance.rate-limit.max-entries}），
+ *       超限淘汰策略见 {@link AbstractBoundedLocalRateLimiter}。</li>
  * </ul>
  *
  * @author API Governance Team
  * @since 1.0
  */
-public class SlidingWindowRateLimiter implements RateLimiter {
+public class SlidingWindowRateLimiter extends AbstractBoundedLocalRateLimiter<SlidingWindowRateLimiter.SlidingWindow> {
 
     private static final Logger log = LoggerFactory.getLogger(SlidingWindowRateLimiter.class);
 
-    /** 默认最大限流键数量。 */
-    private static final int DEFAULT_MAX_ENTRIES = 10_000;
-
-    /** 最大限流键数量。 */
-    private final int maxEntries;
-
-    /** key -> 滑动窗口 的并发映射。 */
-    private final Map<String, SlidingWindow> windows = new ConcurrentHashMap<>();
-
     /** 使用默认键数量上限构造。 */
     public SlidingWindowRateLimiter() {
-        this(DEFAULT_MAX_ENTRIES);
+        super(DEFAULT_MAX_ENTRIES);
     }
 
     /**
@@ -52,23 +41,12 @@ public class SlidingWindowRateLimiter implements RateLimiter {
      * @param maxEntries 最大限流键数量
      */
     public SlidingWindowRateLimiter(int maxEntries) {
-        this.maxEntries = Math.max(1, maxEntries);
+        super(maxEntries);
     }
 
     @Override
     public boolean tryAcquire(String key, int limit, int windowSeconds) {
-        SlidingWindow window = windows.get(key);
-        if (window == null) {
-            window = createWindow(key, limit, windowSeconds);
-        } else {
-            window.touch();
-            // 限流参数变化时重建窗口
-            if (window.limit != limit || window.windowSeconds != windowSeconds) {
-                window = new SlidingWindow(limit, windowSeconds);
-                windows.put(key, window);
-            }
-        }
-        return window.tryAcquire();
+        return acquireState(key, limit, windowSeconds).tryAcquire();
     }
 
     @Override
@@ -78,13 +56,13 @@ public class SlidingWindowRateLimiter implements RateLimiter {
 
     @Override
     public long getCurrentCount(String key) {
-        SlidingWindow window = windows.get(key);
+        SlidingWindow window = getCurrentState(key);
         return window == null ? 0 : window.getCount();
     }
 
     @Override
     public void reset(String key) {
-        SlidingWindow window = windows.get(key);
+        SlidingWindow window = getCurrentState(key);
         if (window != null) {
             window.reset();
             log.debug("重置滑动窗口 - key: {}", key);
@@ -93,58 +71,64 @@ public class SlidingWindowRateLimiter implements RateLimiter {
 
     @Override
     public void resetAll() {
-        windows.clear();
+        clearStates();
         log.info("清空所有滑动窗口");
     }
 
     /** 当前窗口数量（供管理接口展示）。 */
     public int getWindowCount() {
-        return windows.size();
+        return getStateCount();
     }
 
-    private SlidingWindow createWindow(String key, int limit, int windowSeconds) {
-        evictIfNeeded();
-        SlidingWindow created = new SlidingWindow(limit, windowSeconds);
-        SlidingWindow existing = windows.putIfAbsent(key, created);
-        return existing != null ? existing : created;
+    @Override
+    protected boolean isExpired(SlidingWindow state, long now) {
+        // 窗口已滑出：全部时间戳失效，删除后重建状态与原状态限流语义等价
+        return now - state.lastAccess >= state.windowMillis;
     }
 
-    private void evictIfNeeded() {
-        if (windows.size() < maxEntries) {
-            return;
-        }
-        String oldestKey = null;
-        long oldestTime = Long.MAX_VALUE;
-        for (Map.Entry<String, SlidingWindow> entry : windows.entrySet()) {
-            long access = entry.getValue().lastAccess;
-            if (access < oldestTime) {
-                oldestTime = access;
-                oldestKey = entry.getKey();
-            }
-        }
-        if (oldestKey != null) {
-            windows.remove(oldestKey);
-        }
+    @Override
+    protected long accessTime(SlidingWindow state) {
+        return state.lastAccess;
+    }
+
+    @Override
+    protected boolean matches(SlidingWindow state, int limit, int windowSeconds) {
+        return state.limit == limit && state.windowSeconds == windowSeconds;
+    }
+
+    @Override
+    protected SlidingWindow newState(int limit, int windowSeconds) {
+        return new SlidingWindow(limit, windowSeconds);
+    }
+
+    @Override
+    protected void touch(SlidingWindow state) {
+        state.touch();
+    }
+
+    @Override
+    protected void reset(SlidingWindow state) {
+        state.reset();
     }
 
     /**
      * 单个限流键的滑动窗口状态。
      */
-    private static final class SlidingWindow {
+    static final class SlidingWindow {
 
         /** 限流阈值。 */
-        private final int limit;
+        final int limit;
 
         /** 时间窗口（秒）。 */
-        private final int windowSeconds;
+        final int windowSeconds;
 
         /** 窗口长度（毫秒）。 */
-        private final long windowMillis;
+        final long windowMillis;
 
         /** 窗口内请求时间戳队列。 */
         private final ConcurrentLinkedDeque<Long> timestamps = new ConcurrentLinkedDeque<>();
 
-        /** 最近访问时间戳（用于 LRU 淘汰）。 */
+        /** 最近访问时间戳（用于过期判断与 LRU 淘汰）。 */
         private volatile long lastAccess;
 
         SlidingWindow(int limit, int windowSeconds) {

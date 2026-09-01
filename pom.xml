@@ -12,7 +12,7 @@
 
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.2.0</version>
+    <version>0.5.0</version>
     <name>API Governance Spring Boot Starter</name>
     <description>轻量级、插件化的 API 治理 Spring Boot Starter，提供 AOP 拦截、过滤器管道、限流、指标和管理接口。</description>
     <url>https://github.com/BIGLV666/api-governance-spring-boot-starter</url>
@@ -65,13 +65,17 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!-- 链路追踪（0.4.0 起可选）：需要 OpenTelemetry 链路上报的宿主请显式引入，
+             未引入时治理核心能力（限流/指标/日志/告警）完全可用 -->
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-tracing-bridge-otel</artifactId>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>io.opentelemetry</groupId>
             <artifactId>opentelemetry-exporter-otlp</artifactId>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.springframework.kafka</groupId>
@@ -96,6 +100,19 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 端到端 MockMvc 测试用（仅测试类路径，不随 starter 传递） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Redis 限流器集成测试用内嵌 Redis（仅测试类路径） -->
+        <dependency>
+            <groupId>com.github.codemonstur</groupId>
+            <artifactId>embedded-redis</artifactId>
+            <version>1.4.3</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

@@ -1,11 +1,7 @@
 package io.github.biglv666.apigovernance.ratelimit.local;
 
-import io.github.biglv666.apigovernance.ratelimit.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 本机令牌桶限流器。
@@ -22,28 +18,20 @@ import java.util.concurrent.ConcurrentHashMap;
  * <ul>
  *   <li>平滑限流、支持短时突发；</li>
  *   <li>基于时间计算，仅需 O(1) 状态，性能好；</li>
- *   <li>桶数量以「限流键」为维度，并设置最大键数上限 + LRU 淘汰，防止内存膨胀。</li>
+ *   <li>桶数量上限可配置（{@code api.governance.rate-limit.max-entries}），
+ *       超限淘汰策略见 {@link AbstractBoundedLocalRateLimiter}。</li>
  * </ul>
  *
  * @author API Governance Team
  * @since 1.0
  */
-public class TokenBucketRateLimiter implements RateLimiter {
+public class TokenBucketRateLimiter extends AbstractBoundedLocalRateLimiter<TokenBucketRateLimiter.TokenBucket> {
 
     private static final Logger log = LoggerFactory.getLogger(TokenBucketRateLimiter.class);
 
-    /** 默认最大限流键数量（超出后按 LRU 淘汰最久未使用的键）。 */
-    private static final int DEFAULT_MAX_ENTRIES = 10_000;
-
-    /** 最大限流键数量。 */
-    private final int maxEntries;
-
-    /** key -> 令牌桶 的并发映射。 */
-    private final Map<String, TokenBucket> buckets = new ConcurrentHashMap<>();
-
     /** 使用默认键数量上限构造。 */
     public TokenBucketRateLimiter() {
-        this(DEFAULT_MAX_ENTRIES);
+        super(DEFAULT_MAX_ENTRIES);
     }
 
     /**
@@ -52,23 +40,12 @@ public class TokenBucketRateLimiter implements RateLimiter {
      * @param maxEntries 最大限流键数量
      */
     public TokenBucketRateLimiter(int maxEntries) {
-        this.maxEntries = Math.max(1, maxEntries);
+        super(maxEntries);
     }
 
     @Override
     public boolean tryAcquire(String key, int limit, int windowSeconds) {
-        TokenBucket bucket = buckets.get(key);
-        if (bucket == null) {
-            bucket = createBucket(key, limit, windowSeconds);
-        } else {
-            bucket.touch();
-            // 限流参数变化时重建桶，使注解/配置变更即时生效
-            if (bucket.capacity != limit || bucket.windowSeconds != windowSeconds) {
-                bucket = new TokenBucket(limit, windowSeconds);
-                buckets.put(key, bucket);
-            }
-        }
-        return bucket.tryAcquire();
+        return acquireState(key, limit, windowSeconds).tryAcquire();
     }
 
     @Override
@@ -78,13 +55,13 @@ public class TokenBucketRateLimiter implements RateLimiter {
 
     @Override
     public long getCurrentCount(String key) {
-        TokenBucket bucket = buckets.get(key);
+        TokenBucket bucket = getCurrentState(key);
         return bucket == null ? -1 : (long) bucket.getTokens();
     }
 
     @Override
     public void reset(String key) {
-        TokenBucket bucket = buckets.get(key);
+        TokenBucket bucket = getCurrentState(key);
         if (bucket != null) {
             bucket.reset();
             log.debug("重置令牌桶 - key: {}", key);
@@ -93,57 +70,56 @@ public class TokenBucketRateLimiter implements RateLimiter {
 
     @Override
     public void resetAll() {
-        buckets.clear();
+        clearStates();
         log.info("清空所有令牌桶");
     }
 
     /** 当前令牌桶数量（供管理接口展示）。 */
     public int getBucketCount() {
-        return buckets.size();
+        return getStateCount();
     }
 
-    /**
-     * 创建令牌桶（含容量保护）。
-     */
-    private TokenBucket createBucket(String key, int limit, int windowSeconds) {
-        evictIfNeeded();
-        TokenBucket created = new TokenBucket(limit, windowSeconds);
-        TokenBucket existing = buckets.putIfAbsent(key, created);
-        return existing != null ? existing : created;
+    @Override
+    protected boolean isExpired(TokenBucket state, long now) {
+        // 距上次访问超过一个窗口：桶内令牌早已按速率补满，删除后重建为满桶，限流语义等价
+        return now - state.lastAccess >= state.windowSeconds * 1000L;
     }
 
-    /**
-     * 容量保护：超过键数量上限时淘汰最久未使用的键。
-     * 仅在新增键时触发，属于低频路径，允许 O(n) 扫描。
-     */
-    private void evictIfNeeded() {
-        if (buckets.size() < maxEntries) {
-            return;
-        }
-        String oldestKey = null;
-        long oldestTime = Long.MAX_VALUE;
-        for (Map.Entry<String, TokenBucket> entry : buckets.entrySet()) {
-            long access = entry.getValue().lastAccess;
-            if (access < oldestTime) {
-                oldestTime = access;
-                oldestKey = entry.getKey();
-            }
-        }
-        if (oldestKey != null) {
-            buckets.remove(oldestKey);
-        }
+    @Override
+    protected long accessTime(TokenBucket state) {
+        return state.lastAccess;
+    }
+
+    @Override
+    protected boolean matches(TokenBucket state, int limit, int windowSeconds) {
+        return state.capacity == limit && state.windowSeconds == windowSeconds;
+    }
+
+    @Override
+    protected TokenBucket newState(int limit, int windowSeconds) {
+        return new TokenBucket(limit, windowSeconds);
+    }
+
+    @Override
+    protected void touch(TokenBucket state) {
+        state.touch();
+    }
+
+    @Override
+    protected void reset(TokenBucket state) {
+        state.reset();
     }
 
     /**
      * 单个限流键的令牌桶状态。
      */
-    private static final class TokenBucket {
+    static final class TokenBucket {
 
         /** 桶容量（最大令牌数）。 */
-        private final int capacity;
+        final int capacity;
 
         /** 时间窗口（秒），用于换算补充速率。 */
-        private final int windowSeconds;
+        final int windowSeconds;
 
         /** 当前令牌数（double，允许小数令牌）。 */
         private double tokens;
@@ -151,7 +127,7 @@ public class TokenBucketRateLimiter implements RateLimiter {
         /** 上次补充令牌的时间戳（毫秒）。 */
         private long lastRefillTime;
 
-        /** 最近访问时间戳（用于 LRU 淘汰）。 */
+        /** 最近访问时间戳（用于过期判断与 LRU 淘汰）。 */
         private volatile long lastAccess;
 
         TokenBucket(int capacity, int windowSeconds) {

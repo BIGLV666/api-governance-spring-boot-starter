@@ -22,12 +22,17 @@
 - ✅ **SpEL 参数维度限流**：`@RateLimit(key = "#userId")` 一个注解按参数值独立配额（受限求值上下文，安全）。
 - ✅ **限流故障降级**：Redis 故障时可配 fail-open（放行）/ fail-close（503 拒绝），并触发告警。
 - ✅ **Micrometer 指标桥接**：治理指标自动暴露到 `/actuator/prometheus` 等标准生态。
-- ✅ **告警插件**：慢方法 / 限流拒绝 / 限流器故障事件回调自定义通知器，内置 Webhook（钉钉/企微/飞书），带告警风暴抑制。
+- ✅ **告警插件**：慢方法 / 限流拒绝 / 限流器故障事件回调自定义通知器，内置 Webhook 原生对接钉钉（含加签）/企微/飞书，带告警风暴抑制。
 - ✅ **bean / yml 双配置**：注册 Bean 覆盖、yml 配置默认，二选一。
 - ✅ **内存指标 + 有界滑动窗口**：记录慢方法与响应情况，随进程关闭而销毁，内存永不膨胀。
 - ✅ **后台管理接口**：供管理工具/运维平台查询与重置，可选静态令牌鉴权。
 - ✅ **轻量**：Redis / MQ 为可选依赖，无 Lombok，告警 Webhook 基于 JDK HttpClient。
 - ✅ **异步方法钩子**：`@AsyncAction` + `@AsyncHandler` 支持任意公开 Spring Bean 方法的四阶段旁路任务。
+- ✅ **内置过滤器可插拔**（0.3.0 新增）：5 个内置过滤器可按 `api.governance.filters.*` 开关，也可注册同类型 Bean 覆盖。
+- ✅ **HTTP 请求上下文**（0.3.0 新增）：自定义过滤器可直接读取真实请求 URI、HTTP 方法与客户端 IP，无需自行解 `RequestContextHolder`。
+- ✅ **治理范围可配置**（0.4.0 新增）：`include-packages` / `exclude-packages` 按包前缀批量圈定治理范围。
+- ✅ **链路追踪为可选依赖**（0.4.0 新增）：不使用 OpenTelemetry 时零追踪栈开销，治理能力完全不受影响。
+- ✅ **异步钩子可观测**（0.5.0 新增）：Handler 执行指标（次数/耗时/线程池水位）、管理端点注册清单、队列拒绝告警、启动期 action 交叉校验、内置 HTTP 上下文快照 enricher。
 
 ---
 
@@ -39,7 +44,7 @@
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.2.0</version>
+    <version>0.5.0</version>
 </dependency>
 ```
 
@@ -92,6 +97,8 @@ public class UserController {
 api:
   governance:
     enabled: true                     # 治理总开关（默认 true）
+    include-packages: []              # 治理范围包前缀（0.4.0 新增，空=全部）
+    exclude-packages: []              # 排除的包前缀（0.4.0 新增，优先于 include）
     log:
       enabled: true                   # 日志总开关（默认 true）
       log-request-params: false       # 是否输出入参（默认 false，避免敏感信息）
@@ -102,9 +109,16 @@ api:
       algorithm: token-bucket         # token-bucket / sliding-window / custom
       default-limit: -1               # 全局默认限流阈值（-1=不限制）
       default-window: 1               # 全局默认窗口（秒）
+      max-entries: 10000              # 本机限流器最大键数量（SpEL 参数维度限流高基数时可调小）
       status-code: 429                # 限流拒绝的 HTTP 状态码
       message: "请求过于频繁，请稍后重试"  # 限流拒绝提示语
       fail-strategy: open             # 限流器故障降级：open=放行 / close=503 拒绝（作用于 Redis）
+    filters:                          # 内置过滤器开关（0.3.0 新增），也可注册同类型 Bean 覆盖
+      metadata-collector: true
+      traffic-statistics: true
+      rate-limit: true
+      slow-method: true
+      logging: true
     metrics:
       window-size: 100                # 每个 API 保留的最近记录条数
       window-seconds: 300             # 记录保留时长（秒）
@@ -117,10 +131,13 @@ api:
         enabled: false                # 内置 Webhook 通知器
         url: ""                       # webhook 地址（钉钉/企微/飞书机器人）
         timeout-ms: 3000
+        platform: generic             # generic / dingtalk / wecom / feishu（0.3.0 新增）
+        sign-secret: ""               # 钉钉加签密钥（仅 dingtalk 生效，建议 ${DINGTALK_SECRET} 注入）
         secret-token: ""              # 可选，以 X-Governance-Token 头携带
     management:
       enabled: true                   # 管理接口开关（默认 true）
       base-path: /api-governance      # 管理接口基础路径
+      mutations-enabled: true         # 写操作开关（0.4.0 新增，false 时 reset/delete 端点返回失败）
       auth-token: ""                  # 非空时启用管理接口鉴权（建议 ${GOVERNANCE_TOKEN} 注入）
       auth-header: X-Governance-Token # 鉴权令牌请求头名称
     async:
@@ -131,6 +148,8 @@ api:
       keep-alive-seconds: 60
       thread-name-prefix: api-governance-async-
       await-termination-seconds: 5
+      ignore-unmatched-handlers: false # 0.5.0 新增：true 时 handler 引用未知 action 仅 warn（默认启动失败）
+      web-context-enrichment: true     # 0.5.0 新增：事件 data 快照 requestUri/httpMethod/clientIp
 ```
 
 > **说明**：默认 `default-limit: -1`（不限流），即「拦截但不限流」。若希望全局限流，
@@ -305,15 +324,19 @@ public class ParamCheckFilter implements PreFilter {
 }
 ```
 
-内置过滤器顺序：
+内置过滤器顺序（0.3.0 起可通过 `api.governance.filters.*` 关闭，或注册同类型 Bean 覆盖）：
 
 | 阶段 | Order | 过滤器 | 职责 |
 |------|-------|--------|------|
-| 前置 | 1 | MetadataCollectorFilter | 信息采集（HTTP 方法/路径） |
+| 前置 | 1 | MetadataCollectorFilter | 信息采集（真实请求 URI/HTTP 方法，回退注解推导） |
 | 前置 | 100 | TrafficStatisticsFilter | 流量统计（总请求数） |
 | 前置 | 200 | RateLimitFilter | 限流判断 |
 | 后置 | 400 | SlowMethodFilter | 记录耗时 + 更新统计 + 慢方法告警 |
 | 后置 | 500 | LoggingFilter | 日志记录（响应情况） |
+
+`FilterContext` 从 0.3.0 起提供真实 HTTP 请求信息：`getRequestUri()`（真实请求 URI，含路径变量实际值）、
+`getClientIp()`（`X-Forwarded-For` → `X-Real-IP` → `remoteAddr`）、`getHttpMethod()`/`getPath()`（真实值优先）。
+`clientIp` 可被请求头伪造，仅用于统计与告警展示，请勿作为安全决策依据。
 
 ---
 
@@ -344,6 +367,14 @@ public class LoginHandlers {
 支持 `BEFORE`、`AFTER_SUCCESS`、`AFTER_ERROR`、`AFTER_COMPLETION`。所有 Handler 默认异步且不改变原业务结果；`order` 只保证提交顺序，不保证完成顺序。跨线程只传递不可变事件快照，默认不捕获完整参数、返回值和原始异常。
 
 完整使用方式、线程池替换、事件增强、安全边界与限制见 [ASYNC_ACTIONS.md](ASYNC_ACTIONS.md)。
+
+### 异步可观测性（0.5.0 新增）
+
+- **启动期防呆**：`@AsyncHandler` 引用不存在的 action 时启动失败（可用 `ignore-unmatched-handlers: true` 放行为 warn），拼写错误不再静默失效；
+- **指标**：`api.governance.async.executions`（Counter）、`api.governance.async.execution.duration`（Timer）、`api.governance.async.pool.active` / `queue.size`（Gauge），存在 `MeterRegistry` 时自动注册；
+- **告警**：任务被线程池队列拒绝时发布 `ASYNC_TASK_REJECTED` 告警（复用风暴抑制）；
+- **管理端点**：`GET /async/handlers` 查看 Handler 注册清单，`GET /async/status` 查看线程池水位；
+- **HTTP 上下文快照**：事件 `data` 默认携带当前请求的 `requestUri` / `httpMethod` / `clientIp`（可关）。
 
 ---
 
@@ -399,7 +430,7 @@ public class MyAlertNotifier implements GovernanceAlertNotifier {
 }
 ```
 
-内置 `WebhookAlertNotifier`（零额外依赖，基于 JDK HttpClient 异步发送）可对接钉钉/企微/飞书机器人：
+内置 `WebhookAlertNotifier`（零额外依赖，基于 JDK HttpClient 异步发送）可对接钉钉/企微/飞书机器人（0.3.0 起为原生消息格式，钉钉支持加签）：
 
 ```yaml
 api:
@@ -409,8 +440,15 @@ api:
       suppress-interval-ms: 10000   # 同 (类型, apiKey) 10 秒内只发一次，防告警风暴
       webhook:
         enabled: true
-        url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+        platform: dingtalk            # generic / dingtalk / wecom / feishu
+        url: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+        sign-secret: ${DINGTALK_SECRET}   # 钉钉机器人开启「加签」安全设置时必填
 ```
+
+- `dingtalk`/`wecom`：发送 `{"msgtype":"text","text":{"content":...}}` 原生格式；
+- `feishu`：发送 `{"msg_type":"text","content":{"text":...}}` 原生格式；
+- `dingtalk` 且配置 `sign-secret` 时，自动按钉钉规范在 URL 追加 `timestamp` 与 `sign`（HMAC-SHA256 + Base64）；
+- `generic`（默认）：框架自有 JSON 格式（0.2.0 行为），字段为完整事件元数据。
 
 统一分发器（`AlertDispatcher`）负责告警风暴抑制与异常隔离：任一通知器抛出异常只记 warn 日志，
 绝不影响业务请求。事件不含方法入参、返回值与异常堆栈，无敏感信息外泄风险。
@@ -430,7 +468,9 @@ api:
 | GET | `/rate-limiter/count?key=` | 指定 key 当前计数 |
 | POST | `/rate-limiter/reset?key=` | 重置指定 key |
 | POST | `/rate-limiter/reset-all` | 重置全部限流 |
-| GET | `/metrics` | 全部 API 指标汇总 |
+| GET | `/metrics` | 全部 API 指标汇总（0.4.0 起支持 `page`/`size` 分页） |
+| GET | `/async/handlers` | 异步 Handler 注册清单（0.5.0 新增） |
+| GET | `/async/status` | 异步线程池水位与插件状态（0.5.0 新增） |
 | GET | `/metrics/detail?key=` | 单 API 明细（含最近记录） |
 | GET | `/metrics/slow?key=` | 单 API 慢方法列表 |
 | GET | `/metrics/slow/all` | **所有 API 慢方法聚合（Map）** |
@@ -438,6 +478,8 @@ api:
 | DELETE | `/metrics/single?key=` | 清空指定 API 指标 |
 
 > `key` 即 API 唯一标识，格式为 `全限定类名#方法名`，例如 `com.example.UserController#get`。
+> `GET /config` 返回的配置已对敏感字段掩码（0.3.0 起）：`management.auth-token`、
+> `alert.webhook.secret-token`、`alert.webhook.sign-secret` 非空时以 `******` 返回。
 > 生产环境建议开启内置令牌鉴权（0.2.0 新增），或继续通过网关鉴权 / IP 白名单保护：
 
 ```yaml
@@ -450,6 +492,10 @@ api:
 
 启用后，所有管理接口请求必须携带匹配的令牌请求头，否则返回 401（恒定时间比较，防时序侧信道）。
 未配置令牌时行为与 0.1.0 完全一致。
+
+**写操作开关（0.4.0 新增）**：`management.mutations-enabled: false` 可一键禁用全部变更类端点
+（`POST /rate-limiter/reset*`、`DELETE /metrics*`），禁用时返回失败提示，只读端点不受影响，
+适合只读监控场景。
 
 **慢方法聚合接口示例**：
 
@@ -506,6 +552,10 @@ GET /api-governance/metrics/slow/all
 
 ## 十一、分布式链路追踪
 
+> **0.4.0 起 Micrometer Tracing 与 OTLP exporter 为可选依赖**：宿主需要链路上报时请显式引入
+> `io.micrometer:micrometer-tracing-bridge-otel` 与 `io.opentelemetry:opentelemetry-exporter-otlp`
+>（版本随 Spring Boot BOM 管理）。未引入时治理能力不受影响，异步任务上下文传播自动退化为空实现。
+
 Starter 内置 Micrometer Tracing、OpenTelemetry bridge 与 OTLP exporter。HTTP 请求、框架异步任务以及宿主已有的 Spring Kafka / Spring AMQP 组件会自动传播 W3C `traceparent`，业务代码不需要手动维护 `traceId`。
 
 Kafka 和 RabbitMQ 依赖仍是可选的：宿主使用哪个中间件，就只激活哪个适配器。适配器只增强已有的 `KafkaTemplate`、`RabbitTemplate` 和监听容器，不创建或替换连接、序列化及监听配置。
@@ -558,8 +608,8 @@ MQ 的 `traceparent`、`tracestate`、`baggage` 由框架写入消息 Header；�
 | spring-web | @RestController 等 Web 注解 | 否 |
 | jakarta.servlet-api | 管理接口鉴权过滤器（provided，运行期由宿主容器提供） | 否（不传递） |
 | spring-boot-starter-actuator | Observation、追踪与 Micrometer 指标 | 否 |
-| micrometer-tracing-bridge-otel | OpenTelemetry bridge | 否 |
-| opentelemetry-exporter-otlp | OTLP 链路上报 | 否 |
+| micrometer-tracing-bridge-otel | OpenTelemetry bridge（0.4.0 起可选） | 是 |
+| opentelemetry-exporter-otlp | OTLP 链路上报（0.4.0 起可选） | 是 |
 | spring-kafka | Kafka 消息链路适配（宿主使用 Kafka 时激活） | 是 |
 | spring-rabbit | RabbitMQ 消息链路适配（宿主使用 RabbitMQ 时激活） | 是 |
 | spring-boot-configuration-processor | yml 配置元数据 | 是 |
@@ -571,7 +621,41 @@ MQ 的 `traceparent`、`tracestate`、`baggage` 由框架写入消息 Header；�
 
 ---
 
-## 十三、从 0.1.0 升级到 0.2.0
+## 十三、版本升级
+
+### 从 0.4.0 升级到 0.5.0
+
+全部为增量特性，默认行为有两处需留意：
+
+1. **启动期交叉校验默认 fail-fast**：`@AsyncHandler` 引用不存在的 `@AsyncAction` 时启动失败
+   （0.4.0 及之前静默不执行）。存量应用若存在拼错的 action，升级后会启动失败——
+   这正是该缺陷应当暴露的时机；临时放行可配置 `api.governance.async.ignore-unmatched-handlers: true`；
+2. 异步事件的 `data` 默认新增 `requestUri` / `httpMethod` / `clientIp` 三个只读键
+   （可通过 `web-context-enrichment: false` 关闭），对既有 handler 无影响。
+
+其余（指标、管理端点、告警类型）均为纯增量。
+
+### 从 0.3.0 升级到 0.4.0
+
+所有新配置默认值均保持 0.3.0 行为，升级零配置即可完成。需要注意两点：
+
+1. `micrometer-tracing-bridge-otel` 与 `opentelemetry-exporter-otlp` 改为**可选依赖**：
+   若宿主依赖传递获得了这两个 jar 且依赖 starter 的传递引入，升级后需**显式声明**这两个依赖，
+   否则链路上报将静默关闭（治理其余能力不受影响）；
+2. Redis 限流 Lua 脚本改用 Redis 服务器时间（`TIME` 命令）判定窗口与令牌补充，
+   多实例时钟漂移不再影响限流精度（需 Redis 5+，Spring Boot 3.2 基线的场景均满足）。
+
+### 从 0.2.0 升级到 0.3.0
+
+所有新配置默认值均保持 0.2.0 行为，升级零配置即可完成。需要注意三点：
+
+1. `GET /api-governance/config` 的敏感字段（`auth-token`、`secret-token`、`sign-secret`）非空时返回
+   `******` 而非明文 —— 这是敏感信息泄露修复，依赖明文输出的工具需改从环境变量读取；
+2. 上下文中的 `path`/`httpMethod` 由「注解推导值」升级为「真实请求值」（无 Servlet 环境保持注解推导回退）；
+3. Redis 滑动窗口 member 由「毫秒-线程ID」改为 UUID，消除了同毫秒同线程请求计数被覆盖的偏松问题；
+   `resetAll` 从 `KEYS` 改为 `SCAN` 分批执行。
+
+### 从 0.1.0 升级到 0.2.0
 
 所有新特性均为**增量**且默认保持 0.1.0 行为，升级零配置即可完成。需要注意的两点内部变化：
 

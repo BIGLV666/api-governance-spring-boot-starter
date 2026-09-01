@@ -2,6 +2,9 @@ package io.github.biglv666.apigovernance.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * API 治理全局配置属性（前缀 {@code api.governance}）。
  *
@@ -78,6 +81,21 @@ public class ApiGovernanceProperties {
     /** 分布式链路追踪配置。 */
     private Tracing tracing = new Tracing();
 
+    /** 内置过滤器开关配置。 */
+    private Filters filters = new Filters();
+
+    /**
+     * 治理范围包前缀（0.4.0 新增）：非空时<b>仅治理</b>命中这些前缀的包，
+     * 其余包中的 Controller 完全放行（与 @Skip 等价语义）。空列表 = 治理全部。
+     */
+    private List<String> includePackages = new ArrayList<>();
+
+    /**
+     * 排除包前缀（0.4.0 新增）：命中前缀的包不参与治理，优先级高于 {@link #includePackages}。
+     * 常用于排除健康检查、内部调试控制器等。
+     */
+    private List<String> excludePackages = new ArrayList<>();
+
     // ==================== getters / setters ====================
 
     public boolean isEnabled() {
@@ -142,6 +160,30 @@ public class ApiGovernanceProperties {
 
     public void setTracing(Tracing tracing) {
         this.tracing = tracing;
+    }
+
+    public Filters getFilters() {
+        return filters;
+    }
+
+    public void setFilters(Filters filters) {
+        this.filters = filters;
+    }
+
+    public List<String> getIncludePackages() {
+        return includePackages;
+    }
+
+    public void setIncludePackages(List<String> includePackages) {
+        this.includePackages = includePackages == null ? new ArrayList<>() : includePackages;
+    }
+
+    public List<String> getExcludePackages() {
+        return excludePackages;
+    }
+
+    public void setExcludePackages(List<String> excludePackages) {
+        this.excludePackages = excludePackages == null ? new ArrayList<>() : excludePackages;
     }
 
     // ==================== 嵌套配置类 ====================
@@ -226,6 +268,12 @@ public class ApiGovernanceProperties {
         private String failStrategy = "open";
 
         /**
+         * 本机限流器的最大键数量上限（超出后淘汰已过期的键，不足再淘汰最久未使用的键）。
+         * SpEL 参数维度限流（按 userId 等）会产生高基数键，内存敏感场景可调小。
+         */
+        private int maxEntries = 10_000;
+
+        /**
          * 获取限流器故障降级策略（归一化为小写，非法值回退 open）。
          *
          * @return "open" 或 "close"
@@ -236,6 +284,14 @@ public class ApiGovernanceProperties {
 
         public void setFailStrategy(String failStrategy) {
             this.failStrategy = failStrategy;
+        }
+
+        public int getMaxEntries() {
+            return maxEntries;
+        }
+
+        public void setMaxEntries(int maxEntries) {
+            this.maxEntries = maxEntries;
         }
 
         public String getType() {
@@ -358,6 +414,21 @@ public class ApiGovernanceProperties {
         /** 管理接口鉴权令牌的请求头名称（仅 {@link #authToken} 非空时生效）。 */
         private String authHeader = "X-Governance-Token";
 
+        /**
+         * 管理端点写操作开关（0.4.0 新增）：控制 {@code POST /rate-limiter/reset*}、
+         * {@code DELETE /metrics*} 等变更类端点是否可用。关闭时写端点返回失败提示，只读端点不受影响。
+         * 默认开启，保持 0.3.0 行为。
+         */
+        private boolean mutationsEnabled = true;
+
+        public boolean isMutationsEnabled() {
+            return mutationsEnabled;
+        }
+
+        public void setMutationsEnabled(boolean mutationsEnabled) {
+            this.mutationsEnabled = mutationsEnabled;
+        }
+
         public String getAuthToken() {
             return authToken;
         }
@@ -458,6 +529,20 @@ public class ApiGovernanceProperties {
          */
         private String secretToken = "";
 
+        /**
+         * 通知平台格式：{@code generic}（默认，框架自有 JSON 格式）/
+         * {@code dingtalk}（钉钉机器人）/ {@code wecom}（企业微信机器人）/
+         * {@code feishu}（飞书机器人）。非 generic 平台按对应机器人的原生消息格式构造请求体。
+         */
+        private String platform = "generic";
+
+        /**
+         * 加签密钥：仅 {@code platform=dingtalk} 时生效。非空时按钉钉「加签」安全设置，
+         * 在 URL 上追加 {@code &timestamp=...&sign=...}（HMAC-SHA256 + Base64）。
+         * 建议通过环境变量注入，如 {@code sign-secret: ${DINGTALK_SECRET}}。
+         */
+        private String signSecret = "";
+
         public boolean isEnabled() {
             return enabled;
         }
@@ -489,6 +574,87 @@ public class ApiGovernanceProperties {
         public void setSecretToken(String secretToken) {
             this.secretToken = secretToken;
         }
+
+        public String getPlatform() {
+            return platform;
+        }
+
+        public void setPlatform(String platform) {
+            this.platform = platform;
+        }
+
+        public String getSignSecret() {
+            return signSecret;
+        }
+
+        public void setSignSecret(String signSecret) {
+            this.signSecret = signSecret;
+        }
+    }
+
+    /**
+     * 内置过滤器开关：按过滤器粒度控制装配。关闭后对应过滤器 Bean 不再创建；
+     * 注册同名类型的自定义 Bean 也可替换内置实现（内置 Bean 带 {@code ConditionalOnMissingBean}）。
+     *
+     * <p>注意 {@code logging} 与 {@code log.enabled} 的区别：前者是「不装配日志过滤器」，
+     * 后者是「装配但全局不输出日志」（指标统计仍保留）。
+     */
+    public static class Filters {
+
+        /** 信息采集过滤器（元数据采集，order=1）。 */
+        private boolean metadataCollector = true;
+
+        /** 流量统计过滤器（order=100）。 */
+        private boolean trafficStatistics = true;
+
+        /** 限流判断过滤器（order=200）。 */
+        private boolean rateLimit = true;
+
+        /** 慢方法/耗时统计过滤器（order=400）。 */
+        private boolean slowMethod = true;
+
+        /** 日志记录过滤器（order=500）。 */
+        private boolean logging = true;
+
+        public boolean isMetadataCollector() {
+            return metadataCollector;
+        }
+
+        public void setMetadataCollector(boolean metadataCollector) {
+            this.metadataCollector = metadataCollector;
+        }
+
+        public boolean isTrafficStatistics() {
+            return trafficStatistics;
+        }
+
+        public void setTrafficStatistics(boolean trafficStatistics) {
+            this.trafficStatistics = trafficStatistics;
+        }
+
+        public boolean isRateLimit() {
+            return rateLimit;
+        }
+
+        public void setRateLimit(boolean rateLimit) {
+            this.rateLimit = rateLimit;
+        }
+
+        public boolean isSlowMethod() {
+            return slowMethod;
+        }
+
+        public void setSlowMethod(boolean slowMethod) {
+            this.slowMethod = slowMethod;
+        }
+
+        public boolean isLogging() {
+            return logging;
+        }
+
+        public void setLogging(boolean logging) {
+            this.logging = logging;
+        }
     }
 
     /**
@@ -516,6 +682,35 @@ public class ApiGovernanceProperties {
 
         /** Maximum shutdown wait for queued work, in seconds. */
         private int awaitTerminationSeconds = 5;
+
+        /**
+         * 启动期交叉校验放行开关（0.5.0 新增）：默认 {@code false}（fail-fast）——
+         * {@code @AsyncHandler} 引用不存在的 {@code @AsyncAction} 时启动失败；
+         * 设为 {@code true} 仅记 warn 日志（兼容先写 handler 后补 action 的场景）。
+         */
+        private boolean ignoreUnmatchedHandlers = false;
+
+        /**
+         * 内置 HTTP 上下文 enricher 开关（0.5.0 新增）：开启后异步事件的 {@code data}
+         * 会携带当前请求的 {@code requestUri} / {@code httpMethod} / {@code clientIp} 快照。
+         */
+        private boolean webContextEnrichment = true;
+
+        public boolean isIgnoreUnmatchedHandlers() {
+            return ignoreUnmatchedHandlers;
+        }
+
+        public void setIgnoreUnmatchedHandlers(boolean ignoreUnmatchedHandlers) {
+            this.ignoreUnmatchedHandlers = ignoreUnmatchedHandlers;
+        }
+
+        public boolean isWebContextEnrichment() {
+            return webContextEnrichment;
+        }
+
+        public void setWebContextEnrichment(boolean webContextEnrichment) {
+            this.webContextEnrichment = webContextEnrichment;
+        }
 
         public boolean isEnabled() {
             return enabled;

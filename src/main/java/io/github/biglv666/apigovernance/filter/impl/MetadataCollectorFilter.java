@@ -43,6 +43,10 @@ public class MetadataCollectorFilter implements PreFilter {
 
     /**
      * 提取 HTTP 方法与路径。
+     *
+     * <p>真实请求信息由 {@code GovernanceAspect} 在构建上下文时优先注入
+     * （真实 URI / 真实 HTTP 方法 / 客户端 IP）；本过滤器只在字段<b>缺失</b>时
+     * 回退为 {@code @RequestMapping} 注解推导值（非 Servlet 环境的兜底），绝不覆盖真实值。
      */
     private void extractHttpInfo(FilterContext context) {
         Method method = context.getMethod();
@@ -59,11 +63,19 @@ public class MetadataCollectorFilter implements PreFilter {
         RequestMapping mapping = AnnotatedElementUtils.findMergedAnnotation(method, RequestMapping.class);
         if (mapping != null) {
             RequestMethod[] methods = mapping.method();
-            context.setHttpMethod(methods.length > 0 ? methods[0].name() : "UNKNOWN");
-            context.setPath(combine(classPrefix, firstPath(mapping.path())));
+            if (context.getHttpMethod() == null) {
+                context.setHttpMethod(methods.length > 0 ? methods[0].name() : "UNKNOWN");
+            }
+            if (context.getPath() == null) {
+                context.setPath(combine(classPrefix, firstPath(mapping.path())));
+            }
         } else {
-            context.setHttpMethod("UNKNOWN");
-            context.setPath(classPrefix);
+            if (context.getHttpMethod() == null) {
+                context.setHttpMethod("UNKNOWN");
+            }
+            if (context.getPath() == null) {
+                context.setPath(classPrefix);
+            }
         }
     }
 

@@ -12,6 +12,7 @@ import io.github.biglv666.apigovernance.config.ApiGovernanceProperties;
 import io.github.biglv666.apigovernance.exception.GovernanceException;
 import io.github.biglv666.apigovernance.filter.FilterChain;
 import io.github.biglv666.apigovernance.filter.FilterContext;
+import io.github.biglv666.apigovernance.web.HttpRequestContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.aop.support.AopUtils;
@@ -27,6 +28,7 @@ import org.springframework.expression.spel.support.SimpleEvaluationContext;
 import org.springframework.web.bind.annotation.RequestMapping;
 
 import java.lang.reflect.Method;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
 
@@ -94,9 +96,14 @@ public class GovernanceAspect {
 
     /**
      * 切点：所有 {@code @RestController} / {@code @Controller} 类的方法。
+     *
+     * <p>显式排除内置管理控制器 {@code GovernanceManagementController}：它已标注 {@link Skip}
+     * 永不被治理，排除后宿主应用不再为它生成无意义的 CGLIB 代理（省启动开销，
+     * 也规避 CGLIB 弱引用类缓存在多上下文场景下的已知重入/回收缺陷）。
      */
-    @Pointcut("within(@org.springframework.web.bind.annotation.RestController *) || " +
-              "within(@org.springframework.stereotype.Controller *)")
+    @Pointcut("(within(@org.springframework.web.bind.annotation.RestController *) "
+              + "|| within(@org.springframework.stereotype.Controller *)) "
+              + "&& !within(io.github.biglv666.apigovernance.management.GovernanceManagementController)")
     public void controllerPointcut() {
         // 仅作为切点声明，无逻辑
     }
@@ -122,15 +129,20 @@ public class GovernanceAspect {
         if (!properties.isEnabled()) {
             return joinPoint.proceed();
         }
-        // 3. 非请求映射方法（控制器内的公开辅助方法）不参与治理
+        // 3. 包范围过滤：exclude 命中直接放行；include 非空时仅治理命中包
+        if (isOutOfScope(targetClass)) {
+            return joinPoint.proceed();
+        }
+        // 4. 非请求映射方法（控制器内的公开辅助方法）不参与治理
         if (!isMappedMethod(method)) {
             return joinPoint.proceed();
         }
 
-        // 4. 构建上下文并解析配置
+        // 5. 构建上下文并解析配置
         String apiKey = targetClass.getName() + "#" + method.getName();
         FilterContext context = new FilterContext(joinPoint, apiKey, method, targetClass,
                 joinPoint.getArgs());
+        injectHttpRequest(context);
         resolveRateLimit(targetClass, method, context);
         resolveLogEnabled(targetClass, method, context);
 
@@ -138,7 +150,7 @@ public class GovernanceAspect {
         Throwable error = null;
         boolean rejected = false;
         try {
-            // 5. 前置过滤器链：任一 false 即短路
+            // 6. 前置过滤器链：任一 false 即短路
             if (!filterChain.executePreFilters(context)) {
                 rejected = true;
                 throw new GovernanceException(
@@ -146,17 +158,69 @@ public class GovernanceAspect {
                         "REJECTED",
                         context.getRejectReason() != null ? context.getRejectReason() : "请求被拒绝");
             }
-            // 6. 执行业务逻辑（只调用一次）
+            // 7. 执行业务逻辑（只调用一次）
             return result = joinPoint.proceed();
         } catch (Throwable t) {
             error = t;
             throw t;
         } finally {
-            // 7. 后置过滤器链：无论成功/失败/拒绝都执行
+            // 8. 后置过滤器链：无论成功/失败/拒绝都执行
             context.setRejected(rejected);
             context.setResult(result);
             context.setError(error);
             filterChain.executePostFilters(context);
+        }
+    }
+
+    /**
+     * 判断目标类是否在治理范围之外。
+     *
+     * <p>规则：{@code exclude-packages} 命中即排除（优先）；{@code include-packages}
+     * 非空时仅命中前缀的类被治理，其余视为范围外。两个列表均为空时治理全部（0.3.0 行为）。
+     */
+    private boolean isOutOfScope(Class<?> targetClass) {
+        String className = targetClass.getName();
+        for (String pkg : properties.getExcludePackages()) {
+            if (matchesPackage(className, pkg)) {
+                return true;
+            }
+        }
+        List<String> include = properties.getIncludePackages();
+        if (include.isEmpty()) {
+            return false;
+        }
+        for (String pkg : include) {
+            if (matchesPackage(className, pkg)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 类名是否命中包前缀（整包语义：{@code com.x} 命中 {@code com.x} 与 {@code com.x.y}，
+     * 不命中 {@code com.xy}）。
+     */
+    private boolean matchesPackage(String className, String pkg) {
+        if (pkg == null || pkg.isBlank()) {
+            return false;
+        }
+        String trimmed = pkg.trim();
+        return className.equals(trimmed) || className.startsWith(trimmed + ".");
+    }
+
+    /**
+     * 把当前 HTTP 请求的真实信息（URI、方法、客户端 IP）注入上下文。
+     *
+     * <p>切点只命中 Controller，正常都是 Servlet 环境；这里仍兜底捕获 {@link Throwable}：
+     * 无 Servlet 类路径的宿主加载注入器会抛 {@code NoClassDefFoundError}，
+     * 此时保留注解推导的元数据，绝不影响业务请求。
+     */
+    private void injectHttpRequest(FilterContext context) {
+        try {
+            HttpRequestContext.applyTo(context);
+        } catch (Throwable ignored) {
+            // 非 Servlet 环境：path/httpMethod 保持注解推导值（由 MetadataCollectorFilter 填充）
         }
     }
 

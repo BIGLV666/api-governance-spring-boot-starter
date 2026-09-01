@@ -26,13 +26,25 @@ strategies, admin endpoints — with **no heavy external dependencies**.
   with alerting.
 - ✅ **Micrometer bridge** — governance metrics exposed via `/actuator/prometheus` and friends.
 - ✅ **Alerting plugin** — slow-method / rate-limit-reject / limiter-failure events delivered to custom
-  notifiers; built-in webhook notifier (DingTalk/WeCom/Feishu) with alert-storm suppression.
+  notifiers; built-in webhook notifier with native DingTalk (incl. signing) / WeCom / Feishu support and
+  alert-storm suppression.
 - ✅ **Bean or YAML configuration** — register beans to override, or just configure YAML defaults.
 - ✅ **In-memory metrics with bounded sliding windows** — memory never grows unbounded.
 - ✅ **Admin endpoints** — query & reset for ops tooling, optional static-token authentication.
 - ✅ **Lightweight** — Redis / MQ are optional dependencies; no Lombok; webhook alerting uses the JDK HttpClient.
 - ✅ **Async method hooks** — `@AsyncAction` + `@AsyncHandler` run four-phase side tasks around any public
   Spring bean method.
+- ✅ **Pluggable built-in filters** (new in 0.3.0) — toggle each of the 5 built-in filters via
+  `api.governance.filters.*` or override them with same-type beans.
+- ✅ **HTTP request context** (new in 0.3.0) — custom filters read the real request URI, HTTP method and
+  client IP directly from `FilterContext`, no `RequestContextHolder` plumbing required.
+- ✅ **Configurable governance scope** (new in 0.4.0) — `include-packages` / `exclude-packages` toggle
+  governance per package prefix.
+- ✅ **Optional tracing dependencies** (new in 0.4.0) — no OpenTelemetry stack required unless you want
+  trace reporting; all governance capabilities are unaffected.
+- ✅ **Observable async hooks** (new in 0.5.0) — execution metrics (count/duration/pool gauges), admin
+  endpoints for handler registry, queue-rejection alerting, startup cross-validation of action names,
+  and a built-in HTTP-context snapshot enricher.
 
 ---
 
@@ -44,7 +56,7 @@ strategies, admin endpoints — with **no heavy external dependencies**.
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.2.0</version>
+    <version>0.5.0</version>
 </dependency>
 ```
 
@@ -97,6 +109,8 @@ public class UserController {
 api:
   governance:
     enabled: true                     # master switch (default true)
+    include-packages: []              # governance scope prefixes (new in 0.4.0, empty = all)
+    exclude-packages: []              # excluded prefixes (new in 0.4.0, takes precedence)
     log:
       enabled: true
       log-request-params: false       # off by default (sensitive data / log size)
@@ -107,9 +121,16 @@ api:
       algorithm: token-bucket         # token-bucket / sliding-window / custom
       default-limit: -1               # -1 = not limited
       default-window: 1               # seconds
+      max-entries: 10000              # max limiter keys (lower it for high-cardinality SpEL keys)
       status-code: 429
       message: "Too many requests, please retry later"
       fail-strategy: open             # limiter failure: open=allow / close=503 (applies to Redis)
+    filters:                          # built-in filter switches (new in 0.3.0); same-type beans also override
+      metadata-collector: true
+      traffic-statistics: true
+      rate-limit: true
+      slow-method: true
+      logging: true
     metrics:
       window-size: 100
       window-seconds: 300
@@ -122,10 +143,13 @@ api:
         enabled: false
         url: ""                       # webhook endpoint (DingTalk/WeCom/Feishu bot)
         timeout-ms: 3000
+        platform: generic             # generic / dingtalk / wecom / feishu (new in 0.3.0)
+        sign-secret: ""               # DingTalk signing secret (dingtalk only; inject via ${DINGTALK_SECRET})
         secret-token: ""              # optional, sent as X-Governance-Token header
     management:
       enabled: true
       base-path: /api-governance
+      mutations-enabled: true         # write-endpoint switch (new in 0.4.0; false disables reset/delete)
       auth-token: ""                  # non-empty enables token auth for admin endpoints
       auth-header: X-Governance-Token
     async:
@@ -136,6 +160,8 @@ api:
       keep-alive-seconds: 60
       thread-name-prefix: api-governance-async-
       await-termination-seconds: 5
+      ignore-unmatched-handlers: false # new in 0.5.0: true = warn only for unknown actions (default: fail-fast)
+      web-context-enrichment: true     # new in 0.5.0: snapshot requestUri/httpMethod/clientIp into event data
 ```
 
 > By default `default-limit: -1` (no limiting): the pipeline intercepts and measures but never rejects.
@@ -291,15 +317,21 @@ public class ParamCheckFilter implements PreFilter {
 }
 ```
 
-Built-in filters:
+Built-in filters (since 0.3.0 each can be disabled via `api.governance.filters.*` or overridden by a
+same-type bean):
 
 | Phase | Order | Filter | Responsibility |
 |-------|-------|--------|----------------|
-| Pre | 1 | MetadataCollectorFilter | metadata (HTTP method / path) |
+| Pre | 1 | MetadataCollectorFilter | metadata (real request URI/method, falls back to annotations) |
 | Pre | 100 | TrafficStatisticsFilter | traffic counters |
 | Pre | 200 | RateLimitFilter | rate-limit decision |
 | Post | 400 | SlowMethodFilter | elapsed time + stats + slow-method alert |
 | Post | 500 | LoggingFilter | request logging |
+
+Since 0.3.0 `FilterContext` exposes real HTTP request info: `getRequestUri()` (actual URI including path
+variables), `getClientIp()` (`X-Forwarded-For` → `X-Real-IP` → `remoteAddr`), and `getHttpMethod()` /
+`getPath()` (real values take precedence). `clientIp` can be forged via headers — use it for stats and
+alerting only, never for security decisions.
 
 ---
 
@@ -331,6 +363,18 @@ Phases: `BEFORE`, `AFTER_SUCCESS`, `AFTER_ERROR`, `AFTER_COMPLETION`. Handlers a
 default and never alter business results. Only immutable event snapshots cross threads — full
 parameters, return values and original exceptions are not captured by default. See
 [ASYNC_ACTIONS.md](ASYNC_ACTIONS.md).
+
+### Async observability (new in 0.5.0)
+
+- **Startup fail-fast**: an `@AsyncHandler` referencing a non-existent action fails startup
+  (downgradable to a warning via `ignore-unmatched-handlers: true`);
+- **Metrics**: `api.governance.async.executions` (Counter), `api.governance.async.execution.duration`
+  (Timer), `api.governance.async.pool.active` / `queue.size` (Gauges) — registered when a
+  `MeterRegistry` exists;
+- **Alerting**: queue rejections publish an `ASYNC_TASK_REJECTED` alert (storm suppression reused);
+- **Admin endpoints**: `GET /async/handlers` (handler registry), `GET /async/status` (pool status);
+- **HTTP context snapshot**: event `data` carries `requestUri` / `httpMethod` / `clientIp`
+  of the current request (optional).
 
 ---
 
@@ -386,8 +430,8 @@ public class MyAlertNotifier implements GovernanceAlertNotifier {
 }
 ```
 
-The built-in `WebhookAlertNotifier` (zero extra dependencies, async JDK HttpClient) targets
-DingTalk / WeCom / Feishu bots:
+The built-in `WebhookAlertNotifier` (zero extra dependencies, async JDK HttpClient) natively targets
+DingTalk / WeCom / Feishu bots since 0.3.0, including DingTalk signing:
 
 ```yaml
 api:
@@ -397,8 +441,15 @@ api:
       suppress-interval-ms: 10000   # one alert per (type, apiKey) per 10s, storm protection
       webhook:
         enabled: true
-        url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+        platform: dingtalk            # generic / dingtalk / wecom / feishu
+        url: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+        sign-secret: ${DINGTALK_SECRET}   # required when the bot enables "signing" security
 ```
+
+- `dingtalk` / `wecom`: native `{"msgtype":"text","text":{"content":...}}` payload;
+- `feishu`: native `{"msg_type":"text","content":{"text":...}}` payload;
+- `dingtalk` with `sign-secret`: appends `timestamp` and `sign` (HMAC-SHA256 + Base64) to the URL;
+- `generic` (default): the framework's own JSON format (0.2.0 behavior) with full event metadata.
 
 The shared dispatcher suppresses storms and isolates failures: any notifier exception is logged (warn)
 and never affects requests. Events carry no method arguments, return values or stack traces.
@@ -412,13 +463,15 @@ Base path defaults to `/api-governance` (configurable):
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/status` | governance status |
-| GET | `/config` | current configuration |
+| GET | `/config` | current configuration (sensitive fields masked since 0.3.0) |
 | GET | `/filters` | filter chain info |
 | GET | `/rate-limiter/status` | limiter status |
 | GET | `/rate-limiter/count?key=` | current count for a key |
 | POST | `/rate-limiter/reset?key=` | reset a key |
 | POST | `/rate-limiter/reset-all` | reset all |
-| GET | `/metrics` | all API metrics summary |
+| GET | `/metrics` | all API metrics summary (supports `page`/`size` since 0.4.0) |
+| GET | `/async/handlers` | registered async handler list (new in 0.5.0) |
+| GET | `/async/status` | async thread-pool status (new in 0.5.0) |
 | GET | `/metrics/detail?key=` | single API detail (recent records) |
 | GET | `/metrics/slow?key=` | slow requests for one API |
 | GET | `/metrics/slow/all` | slow requests aggregated across APIs |
@@ -494,8 +547,8 @@ and `correlationId` independently — do not use `traceId` for consumer idempote
 | spring-web | @RestController annotations | No |
 | jakarta.servlet-api | admin auth filter (provided; supplied by host container at runtime) | No (not transitive) |
 | spring-boot-starter-actuator | Observation, tracing, Micrometer metrics | No |
-| micrometer-tracing-bridge-otel | OpenTelemetry bridge | No |
-| opentelemetry-exporter-otlp | OTLP trace export | No |
+| micrometer-tracing-bridge-otel | OpenTelemetry bridge (optional since 0.4.0) | Yes |
+| opentelemetry-exporter-otlp | OTLP trace export (optional since 0.4.0) | Yes |
 | spring-kafka | Kafka tracing adapter | Yes |
 | spring-rabbit | RabbitMQ tracing adapter | Yes |
 | spring-boot-configuration-processor | YAML metadata | Yes |
@@ -506,7 +559,45 @@ and `correlationId` independently — do not use `traceId` for consumer idempote
 
 ---
 
-## 13. Upgrading from 0.1.0 to 0.2.0
+## 13. Version Upgrades
+
+### Upgrading from 0.4.0 to 0.5.0
+
+All changes are additive, with two behavioral notes:
+
+1. **Startup cross-validation defaults to fail-fast**: an `@AsyncHandler` referencing a non-existent
+   `@AsyncAction` now fails startup (previously it silently never executed). Set
+   `api.governance.async.ignore-unmatched-handlers: true` to downgrade to a warning;
+2. Async event `data` gains three read-only keys by default — `requestUri` / `httpMethod` / `clientIp`
+   (disable via `web-context-enrichment: false`). No impact on existing handlers.
+
+Metrics, admin endpoints and the new alert type are purely additive.
+
+### Upgrading from 0.3.0 to 0.4.0
+
+All new configuration defaults keep the 0.3.0 behaviour — no configuration changes required. Two notes:
+
+1. `micrometer-tracing-bridge-otel` and `opentelemetry-exporter-otlp` are now **optional dependencies**:
+   if your build relied on receiving them transitively through this starter, declare them explicitly
+   or trace reporting silently turns off (all other governance capabilities are unaffected);
+2. The Redis limiter Lua scripts now take the time from the Redis server (`TIME` command) for window
+   and token-refill decisions — clock drift across instances no longer affects limiting accuracy
+   (Redis 5+; always satisfied by the Spring Boot 3.2 baseline).
+
+### Upgrading from 0.2.0 to 0.3.0
+
+All new configuration defaults keep the 0.2.0 behaviour — no configuration changes required. Three notes:
+
+1. `GET /api-governance/config` masks sensitive fields (`auth-token`, `secret-token`, `sign-secret`) as
+   `******` when non-empty — this fixes a sensitive-information leak; tools relying on plaintext must
+   read the values from environment variables instead.
+2. `path` / `httpMethod` in the filter context are now the **real request values** (falling back to
+   annotation-derived patterns outside a Servlet environment).
+3. The Redis sliding-window member changed from `millis-threadId` to a UUID, removing a lost-count issue
+   when the same thread sends two requests within the same millisecond; `resetAll` now uses batched
+   `SCAN` instead of `KEYS`.
+
+### Upgrading from 0.1.0 to 0.2.0
 
 All new features are **additive** and default to 0.1.0 behaviour — no configuration changes required.
 Two internal changes worth knowing:

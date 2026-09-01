@@ -11,7 +11,9 @@ import io.github.biglv666.apigovernance.async.internal.DefaultAsyncExecutorProvi
 import io.github.biglv666.apigovernance.async.internal.LoggingAsyncHandlerExceptionHandler;
 import io.github.biglv666.apigovernance.async.internal.LoggingAsyncTaskRejectionHandler;
 import io.github.biglv666.apigovernance.async.internal.NoopAsyncTaskContextPropagator;
+import io.github.biglv666.apigovernance.async.internal.WebContextEnricher;
 import io.github.biglv666.apigovernance.async.spi.AsyncEventEnricher;
+import io.github.biglv666.apigovernance.async.spi.AsyncExecutionListener;
 import io.github.biglv666.apigovernance.async.spi.AsyncExecutorProvider;
 import io.github.biglv666.apigovernance.async.spi.AsyncHandlerExceptionHandler;
 import io.github.biglv666.apigovernance.async.spi.AsyncTaskRejectionHandler;
@@ -30,6 +32,7 @@ import io.github.biglv666.apigovernance.management.GovernanceManagementAuthFilte
 import io.github.biglv666.apigovernance.management.GovernanceManagementController;
 import io.github.biglv666.apigovernance.metrics.MetricsEventListener;
 import io.github.biglv666.apigovernance.metrics.MetricsRegistry;
+import io.github.biglv666.apigovernance.metrics.micrometer.MicrometerAsyncExecutionListener;
 import io.github.biglv666.apigovernance.metrics.micrometer.MicrometerMetricsEventListener;
 import io.github.biglv666.apigovernance.ratelimit.DefaultRateLimitKeyResolver;
 import io.github.biglv666.apigovernance.ratelimit.RateLimitAlgorithm;
@@ -139,6 +142,27 @@ public class ApiGovernanceAutoConfiguration {
                 .register(registry);
     }
 
+    // ==================== 异步执行 Micrometer 桥接（0.5.0 新增） ====================
+
+    /**
+     * 异步执行 Micrometer 桥接：异步 Handler 的执行结果与线程池水位同步为标准指标。
+     * 容器中没有 MeterRegistry 时不创建（异步链路零指标开销）。
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "api.governance.metrics", name = "micrometer-enabled",
+            havingValue = "true", matchIfMissing = true)
+    public MicrometerAsyncExecutionListener micrometerAsyncExecutionListener(
+            ObjectProvider<MeterRegistry> meterRegistry,
+            ObjectProvider<AsyncExecutorProvider> executorProvider) {
+        MeterRegistry registry = meterRegistry.getIfAvailable();
+        if (registry == null) {
+            return null;
+        }
+        AsyncExecutorProvider provider = executorProvider.getIfAvailable();
+        return new MicrometerAsyncExecutionListener(registry,
+                provider == null ? null : provider.getExecutor());
+    }
+
     // ==================== 告警 ====================
 
     /**
@@ -153,9 +177,9 @@ public class ApiGovernanceAutoConfiguration {
             throw new IllegalStateException(
                     "api.governance.alert.webhook.enabled=true 但未配置 webhook.url，请补充目标地址");
         }
-        log.info("启用 Webhook 告警通知器");
+        log.info("启用 Webhook 告警通知器 - platform: {}", webhook.getPlatform());
         return new WebhookAlertNotifier(webhook.getUrl().trim(), webhook.getTimeoutMs(),
-                webhook.getSecretToken());
+                webhook.getSecretToken(), webhook.getPlatform(), webhook.getSignSecret());
     }
 
     /**
@@ -199,21 +223,31 @@ public class ApiGovernanceAutoConfiguration {
             return new StrategyRateLimiter("custom-strategy", strategy);
         }
         if (algorithm == RateLimitAlgorithm.SLIDING_WINDOW) {
-            log.info("配置限流器: 本机滑动窗口");
-            return new SlidingWindowRateLimiter();
+            log.info("配置限流器: 本机滑动窗口 (maxEntries: {})", properties.getRateLimit().getMaxEntries());
+            return new SlidingWindowRateLimiter(properties.getRateLimit().getMaxEntries());
         }
-        log.info("配置限流器: 本机令牌桶");
-        return new TokenBucketRateLimiter();
+        log.info("配置限流器: 本机令牌桶 (maxEntries: {})", properties.getRateLimit().getMaxEntries());
+        return new TokenBucketRateLimiter(properties.getRateLimit().getMaxEntries());
     }
 
     // ==================== 内置过滤器 ====================
 
+    // 每个内置过滤器均支持两种替换方式：
+    // 1. 注册同类型 Bean 覆盖（@ConditionalOnMissingBean 自动让位）；
+    // 2. 通过 api.governance.filters.* 开关关闭（@ConditionalOnProperty，Bean 不创建）。
+
     @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "api.governance.filters", name = "metadata-collector",
+            havingValue = "true", matchIfMissing = true)
     public MetadataCollectorFilter metadataCollectorFilter() {
         return new MetadataCollectorFilter();
     }
 
     @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "api.governance.filters", name = "traffic-statistics",
+            havingValue = "true", matchIfMissing = true)
     public TrafficStatisticsFilter trafficStatisticsFilter(MetricsRegistry metricsRegistry) {
         return new TrafficStatisticsFilter(metricsRegistry);
     }
@@ -228,6 +262,9 @@ public class ApiGovernanceAutoConfiguration {
     }
 
     @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "api.governance.filters", name = "rate-limit",
+            havingValue = "true", matchIfMissing = true)
     public RateLimitFilter rateLimitFilter(ObjectProvider<RateLimiter> rateLimiter,
                                            MetricsRegistry metricsRegistry,
                                            ApiGovernanceProperties properties,
@@ -238,12 +275,18 @@ public class ApiGovernanceAutoConfiguration {
     }
 
     @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "api.governance.filters", name = "slow-method",
+            havingValue = "true", matchIfMissing = true)
     public SlowMethodFilter slowMethodFilter(MetricsRegistry metricsRegistry,
                                              ApiGovernanceProperties properties) {
         return new SlowMethodFilter(metricsRegistry, properties);
     }
 
     @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "api.governance.filters", name = "logging",
+            havingValue = "true", matchIfMissing = true)
     public LoggingFilter loggingFilter(ApiGovernanceProperties properties) {
         return new LoggingFilter(properties);
     }
@@ -261,8 +304,10 @@ public class ApiGovernanceAutoConfiguration {
 
     /**
      * Controller 治理管道的唯一 AOP 切面入口。
+     * 注册自定义 {@code GovernanceAspect} Bean 可完全替换（0.4.0 起）。
      */
     @Bean
+    @ConditionalOnMissingBean
     public GovernanceAspect governanceAspect(FilterChain filterChain,
                                              ApiGovernanceProperties properties) {
         return new GovernanceAspect(filterChain, properties);
@@ -303,8 +348,10 @@ public class ApiGovernanceAutoConfiguration {
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "api.governance.async", name = "enabled",
             havingValue = "true", matchIfMissing = true)
-    public AsyncTaskRejectionHandler asyncTaskRejectionHandler() {
-        return new LoggingAsyncTaskRejectionHandler();
+    public AsyncTaskRejectionHandler asyncTaskRejectionHandler(
+            ObjectProvider<AlertDispatcher> alertDispatcher) {
+        // 告警启用时，异步任务被队列拒绝会触发 ASYNC_TASK_REJECTED 告警（复用风暴抑制）
+        return new LoggingAsyncTaskRejectionHandler(alertDispatcher.getIfAvailable());
     }
 
     @Bean
@@ -318,8 +365,11 @@ public class ApiGovernanceAutoConfiguration {
     @Bean
     @ConditionalOnProperty(prefix = "api.governance.async", name = "enabled",
             havingValue = "true", matchIfMissing = true)
-    public AsyncHandlerRegistry asyncHandlerRegistry(ConfigurableListableBeanFactory beanFactory) {
-        return new AsyncHandlerRegistry(beanFactory);
+    public AsyncHandlerRegistry asyncHandlerRegistry(ConfigurableListableBeanFactory beanFactory,
+                                                     ApiGovernanceProperties properties) {
+        // 0.5.0 起启动期交叉校验 @AsyncHandler → @AsyncAction（fail-fast，可配置放行）
+        return new AsyncHandlerRegistry(beanFactory,
+                properties.getAsync().isIgnoreUnmatchedHandlers());
     }
 
     @Bean
@@ -327,6 +377,17 @@ public class ApiGovernanceAutoConfiguration {
             havingValue = "true", matchIfMissing = true)
     public AsyncEventFactory asyncEventFactory(ObjectProvider<AsyncEventEnricher> enrichers) {
         return new AsyncEventFactory(enrichers.orderedStream().toList());
+    }
+
+    /**
+     * 内置 HTTP 上下文 enricher：把当前请求 URI/方法/客户端 IP 快照进异步事件 data
+     * （可通过 {@code api.governance.async.web-context-enrichment=false} 关闭）。
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "api.governance.async", name = "web-context-enrichment",
+            havingValue = "true", matchIfMissing = true)
+    public AsyncEventEnricher webContextEnricher() {
+        return new WebContextEnricher();
     }
 
     @Bean
@@ -337,9 +398,11 @@ public class ApiGovernanceAutoConfiguration {
                                             AsyncExecutorProvider executorProvider,
                                             AsyncHandlerExceptionHandler exceptionHandler,
                                             AsyncTaskRejectionHandler rejectionHandler,
-                                            AsyncTaskContextPropagator contextPropagator) {
+                                            AsyncTaskContextPropagator contextPropagator,
+                                            ObjectProvider<AsyncExecutionListener> executionListeners) {
         return new AsyncDispatcher(registry, eventFactory, executorProvider,
-                exceptionHandler, rejectionHandler, contextPropagator);
+                exceptionHandler, rejectionHandler, contextPropagator,
+                executionListeners.orderedStream().toList());
     }
 
     @Bean
@@ -361,9 +424,12 @@ public class ApiGovernanceAutoConfiguration {
             ApiGovernanceProperties properties,
             ObjectProvider<RateLimiter> rateLimiter,
             FilterChain filterChain,
-            MetricsRegistry metricsRegistry) {
+            MetricsRegistry metricsRegistry,
+            ObjectProvider<AsyncHandlerRegistry> asyncHandlerRegistry,
+            ObjectProvider<AsyncExecutorProvider> asyncExecutorProvider) {
         return new GovernanceManagementController(properties, rateLimiter.getIfAvailable(),
-                filterChain, metricsRegistry);
+                filterChain, metricsRegistry, asyncHandlerRegistry.getIfAvailable(),
+                asyncExecutorProvider.getIfAvailable());
     }
 
     /**

@@ -38,8 +38,23 @@ public class FilterContext {
     /** HTTP 方法（GET/POST 等）。 */
     private String httpMethod;
 
-    /** 请求路径（含路径变量模式）。 */
+    /**
+     * 请求路径。优先为<b>真实请求 URI</b>（含 context-path 与路径变量实际值，
+     * 由切面从当前请求注入）；非 Servlet 环境下为 {@code @RequestMapping} 注解推导的路径模式。
+     */
     private String path;
+
+    /**
+     * 真实请求 URI（{@code HttpServletRequest#getRequestURI()}）。
+     * 非 Servlet 环境（MQ 消费、测试直调等）为 null。
+     */
+    private String requestUri;
+
+    /**
+     * 客户端 IP：按 {@code X-Forwarded-For}（取第一个）→ {@code X-Real-IP} →
+     * {@code remoteAddr} 优先级解析。非 Servlet 环境为 null。
+     */
+    private String clientIp;
 
     /** 限流阈值（窗口内最大请求数）。 */
     private int rateLimit = -1;
@@ -133,6 +148,22 @@ public class FilterContext {
 
     public void setPath(String path) {
         this.path = path;
+    }
+
+    public String getRequestUri() {
+        return requestUri;
+    }
+
+    public void setRequestUri(String requestUri) {
+        this.requestUri = requestUri;
+    }
+
+    public String getClientIp() {
+        return clientIp;
+    }
+
+    public void setClientIp(String clientIp) {
+        this.clientIp = clientIp;
     }
 
     // ==================== 限流配置 ====================

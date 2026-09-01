@@ -5,9 +5,16 @@ import io.github.biglv666.apigovernance.alert.webhook.WebhookAlertNotifier;
 import io.github.biglv666.apigovernance.aspect.GovernanceAspect;
 import io.github.biglv666.apigovernance.async.aspect.AsyncActionAspect;
 import io.github.biglv666.apigovernance.async.internal.AsyncHandlerRegistry;
+import io.github.biglv666.apigovernance.async.internal.NoopAsyncTaskContextPropagator;
 import io.github.biglv666.apigovernance.async.spi.AsyncExecutorProvider;
+import io.github.biglv666.apigovernance.async.spi.AsyncTaskContextPropagator;
 import io.github.biglv666.apigovernance.config.ApiGovernanceAutoConfiguration;
 import io.github.biglv666.apigovernance.filter.FilterChain;
+import io.github.biglv666.apigovernance.filter.impl.LoggingFilter;
+import io.github.biglv666.apigovernance.filter.impl.MetadataCollectorFilter;
+import io.github.biglv666.apigovernance.filter.impl.RateLimitFilter;
+import io.github.biglv666.apigovernance.filter.impl.SlowMethodFilter;
+import io.github.biglv666.apigovernance.filter.impl.TrafficStatisticsFilter;
 import io.github.biglv666.apigovernance.management.GovernanceManagementController;
 import io.github.biglv666.apigovernance.metrics.MetricsRegistry;
 import io.github.biglv666.apigovernance.metrics.micrometer.MicrometerMetricsEventListener;
@@ -18,12 +25,17 @@ import io.github.biglv666.apigovernance.ratelimit.RateLimitStrategy;
 import io.github.biglv666.apigovernance.ratelimit.StrategyRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.local.SlidingWindowRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.local.TokenBucketRateLimiter;
+import io.github.biglv666.apigovernance.trace.ApiGovernanceTracingAutoConfiguration;
+import io.micrometer.context.ContextSnapshotFactory;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -209,6 +221,93 @@ class ApiGovernanceAutoConfigurationTests {
                             ctx.getBean("governanceManagementAuthFilter", FilterRegistrationBean.class);
                     assertThat(registration.isEnabled()).isTrue();
                     assertThat(registration.getUrlPatterns()).contains("/api-governance/*");
+                });
+    }
+
+    // ==================== 0.3.0 新特性装配 ====================
+
+    @Test
+    void builtInFiltersCanBeDisabledByProperties() {
+        runner.withPropertyValues(
+                        "api.governance.filters.metadata-collector=false",
+                        "api.governance.filters.traffic-statistics=false",
+                        "api.governance.filters.rate-limit=false",
+                        "api.governance.filters.slow-method=false",
+                        "api.governance.filters.logging=false")
+                .run(ctx -> {
+                    assertThat(ctx).doesNotHaveBean(MetadataCollectorFilter.class);
+                    assertThat(ctx).doesNotHaveBean(TrafficStatisticsFilter.class);
+                    assertThat(ctx).doesNotHaveBean(RateLimitFilter.class);
+                    assertThat(ctx).doesNotHaveBean(SlowMethodFilter.class);
+                    assertThat(ctx).doesNotHaveBean(LoggingFilter.class);
+                    // 全部内置过滤器关闭后，链为空但仍可用（用户自定义过滤器仍会加入）
+                    assertThat(ctx.getBean(FilterChain.class).getPreFilterCount()).isZero();
+                });
+    }
+
+    @Test
+    void customFilterBeanOverridesBuiltIn() {
+        LoggingFilter custom = new LoggingFilter(new io.github.biglv666.apigovernance.config.ApiGovernanceProperties());
+        runner.withBean(LoggingFilter.class, () -> custom)
+                .run(ctx -> assertThat(ctx.getBean(LoggingFilter.class)).isSameAs(custom));
+    }
+
+    @Test
+    void localRateLimiterRespectsMaxEntriesProperty() {
+        runner.withPropertyValues("api.governance.rate-limit.max-entries=5")
+                .run(ctx -> {
+                    RateLimiter limiter = ctx.getBean(RateLimiter.class);
+                    // maxEntries 影响 LRU 上限：行为上表现为所有键都能正常获取
+                    assertThat(limiter.tryAcquire("k1", 10, 60)).isTrue();
+                    assertThat(limiter.tryAcquire("k2", 10, 60)).isTrue();
+                });
+    }
+
+    @Test
+    void webhookPlatformWiring() {
+        runner.withPropertyValues(
+                        "api.governance.alert.webhook.enabled=true",
+                        "api.governance.alert.webhook.url=https://example.com/hook",
+                        "api.governance.alert.webhook.platform=dingtalk",
+                        "api.governance.alert.webhook.sign-secret=secret")
+                .run(ctx -> {
+                    WebhookAlertNotifier notifier = ctx.getBean(WebhookAlertNotifier.class);
+                    assertThat(notifier.getPlatform()).isEqualTo("dingtalk");
+                });
+    }
+
+    @Test
+    void webhookUnknownPlatformFailsStartup() {
+        runner.withPropertyValues(
+                        "api.governance.alert.webhook.enabled=true",
+                        "api.governance.alert.webhook.url=https://example.com/hook",
+                        "api.governance.alert.webhook.platform=slack")
+                .run(ctx -> assertThat(ctx).hasFailed());
+    }
+
+    // ==================== 0.4.0 新特性装配 ====================
+
+    @Test
+    void governanceAspectBeanCanBeReplaced() {
+        GovernanceAspect custom = new GovernanceAspect(
+                new FilterChain(List.of(), List.of()), new io.github.biglv666.apigovernance.config.ApiGovernanceProperties());
+        runner.withBean(GovernanceAspect.class, () -> custom)
+                .run(ctx -> assertThat(ctx.getBean(GovernanceAspect.class)).isSameAs(custom));
+    }
+
+    @Test
+    void governanceWorksWithoutTracingClasspath() {
+        // 模拟 0.4.0 起未引入 micrometer-tracing/otlp 的宿主：
+        // tracing 自动配置整体回退，异步传播退化为 Noop，治理核心能力全部可用
+        runner.withClassLoader(new FilteredClassLoader(ContextSnapshotFactory.class))
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(GovernanceAspect.class);
+                    assertThat(ctx).hasSingleBean(RateLimiter.class);
+                    assertThat(ctx).hasSingleBean(FilterChain.class);
+                    assertThat(ctx).hasSingleBean(GovernanceManagementController.class);
+                    assertThat(ctx).doesNotHaveBean(ApiGovernanceTracingAutoConfiguration.class);
+                    assertThat(ctx.getBean(AsyncTaskContextPropagator.class))
+                            .isInstanceOf(NoopAsyncTaskContextPropagator.class);
                 });
     }
 }

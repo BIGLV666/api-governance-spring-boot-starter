@@ -105,4 +105,22 @@ class AlertDispatcherTest {
         assertEquals(GovernanceAlertEvent.Type.RATE_LIMITER_FAILURE, event.getType());
         assertEquals("sliding-window-redis", event.getApiKey());
     }
+
+    @Test
+    void suppressionMapStaysBoundedUnderHighCardinalityKeys() throws Exception {
+        CollectingNotifier notifier = new CollectingNotifier();
+        AlertDispatcher dispatcher = new AlertDispatcher(List.of(notifier), 10, 1000);
+
+        // 高基数 apiKey 持续触发慢方法告警（0.2.0 中抑制表会无限增长）
+        for (int i = 0; i < 20_000; i++) {
+            dispatcher.onResult("api-" + i, 1500, true, true, "GET", "/x", null);
+        }
+        // 等待抑制窗口全部滑出，再触发一次分发以启动过期清理
+        Thread.sleep(30);
+        dispatcher.onResult("api-final", 1500, true, true, "GET", "/x", null);
+
+        // 契约是「有界」而非「清空」：抑制表始终不超过上限
+        assertTrue(dispatcher.getSuppressionEntryCount() <= 10_000,
+                "抑制表应保持有界，实际: " + dispatcher.getSuppressionEntryCount());
+    }
 }

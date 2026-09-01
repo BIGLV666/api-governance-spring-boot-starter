@@ -124,6 +124,7 @@ api:
 | `AsyncHandlerExceptionHandler` | 处理 Handler 执行异常 |
 | `AsyncTaskRejectionHandler` | 处理 Executor 拒绝 |
 | `AsyncEventEnricher` | 在调用线程增加安全事件快照，可注册多个并按 Spring order 执行 |
+| `AsyncExecutionListener`（0.5.0 新增） | 观测 Handler 执行结果（成功/失败/拒绝），可注册多个，默认实现为 Micrometer 桥接 |
 
 ```java
 @Bean
@@ -131,6 +132,39 @@ public AsyncExecutorProvider governanceExecutor(Executor applicationExecutor) {
     return () -> applicationExecutor;
 }
 ```
+
+## 启动期交叉校验（0.5.0 新增）
+
+启动时所有 `@AsyncHandler` 引用的 action 必须存在对应的 `@AsyncAction`，否则启动失败
+（fail-fast 防呆：action 拼写错误导致的「handler 永不执行」在启动期即暴露）。
+如需放行（如先写 handler、后补 action 的开发流程），配置
+`api.governance.async.ignore-unmatched-handlers: true`，此时不匹配仅记 warn 日志。
+
+## HTTP 上下文快照（0.5.0 新增）
+
+默认开启的内置 enricher 会把当前请求的元数据快照进事件 `data`：
+键 `requestUri`、`httpMethod`、`clientIp`（X-Forwarded-For → X-Real-IP → remoteAddr）。
+不捕获请求头、参数与请求体；非 Web 线程不写入任何数据。
+可通过 `api.governance.async.web-context-enrichment: false` 关闭。
+
+```java
+@AsyncHandler(value = "user.login", phase = AsyncPhase.AFTER_SUCCESS)
+public void saveLoginLog(AsyncEvent event) {
+    String uri = (String) event.data().get("requestUri");
+}
+```
+
+## 可观测性（0.5.0 新增）
+
+- **指标**（存在 `MeterRegistry` 时自动注册）：
+  `api.governance.async.executions`（Counter，标签 action/outcome ∈ success/failure/rejected）、
+  `api.governance.async.execution.duration`（Timer，标签 action/outcome）、
+  `api.governance.async.pool.active` / `api.governance.async.pool.queue.size`（Gauge，仅内置线程池）。
+  注意保持 action 名数量有限，避免标签基数膨胀；
+- **告警**：任务被线程池拒绝时发布 `ASYNC_TASK_REJECTED` 告警（复用告警风暴抑制，需告警已启用）；
+- **管理端点**：
+  `GET /api-governance/async/handlers` 返回全部已注册 Handler 清单（诊断注册与 action 匹配情况），
+  `GET /api-governance/async/status` 返回线程池水位（核心/最大线程数、活跃数、队列水位、完成任务数）。
 
 ## Spring AOP 边界
 

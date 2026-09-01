@@ -33,7 +33,9 @@ api:
       webhook:
         enabled: false               # 演示用 ConsoleAlertNotifier，如需 webhook：
         # enabled: true
-        # url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+        # platform: dingtalk          # generic / dingtalk / wecom / feishu
+        # url: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+        # sign-secret: ${DINGTALK_SECRET}   # 钉钉开启「加签」时必填
     management:
       enabled: true
       base-path: /api-governance

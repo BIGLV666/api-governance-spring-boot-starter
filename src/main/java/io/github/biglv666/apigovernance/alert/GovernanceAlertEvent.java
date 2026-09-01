@@ -27,7 +27,10 @@ public class GovernanceAlertEvent {
         RATE_LIMIT_REJECT,
 
         /** 限流器故障：限流器（如 Redis）执行异常，按 fail-strategy 降级处理。 */
-        RATE_LIMITER_FAILURE
+        RATE_LIMITER_FAILURE,
+
+        /** 异步任务被拒绝（0.5.0 新增）：框架线程池队列满且达到最大线程数。 */
+        ASYNC_TASK_REJECTED
     }
 
     private final Type type;
@@ -93,6 +96,20 @@ public class GovernanceAlertEvent {
     public static GovernanceAlertEvent rateLimiterFailure(String rateLimiterName, String error) {
         return new GovernanceAlertEvent(Type.RATE_LIMITER_FAILURE, rateLimiterName, null, null,
                 "限流器故障: " + error, -1, -1, System.currentTimeMillis());
+    }
+
+    /**
+     * 创建异步任务被拒绝告警事件（0.5.0 新增）。
+     *
+     * @param action   异步动作名
+     * @param handler  Handler 方法标识（完整方法签名）
+     * @param error    拒绝原因摘要
+     * @return 告警事件
+     */
+    public static GovernanceAlertEvent asyncTaskRejected(String action, String handler, String error) {
+        return new GovernanceAlertEvent(Type.ASYNC_TASK_REJECTED, action, null, null,
+                "异步任务被拒绝: handler=" + handler + ", 原因=" + error,
+                -1, -1, System.currentTimeMillis());
     }
 
     public Type getType() {

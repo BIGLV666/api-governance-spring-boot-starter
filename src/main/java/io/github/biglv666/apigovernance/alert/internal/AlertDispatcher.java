@@ -48,6 +48,9 @@ public class AlertDispatcher implements MetricsEventListener {
     /** 抑制状态：key = type|apiKey，value = 上次分发时间戳。 */
     private final Map<String, Long> lastDispatchTime = new ConcurrentHashMap<>();
 
+    /** 抑制状态最大条目数：超过后清理已出抑制窗口的条目，防止高基数 apiKey 下的缓慢泄漏。 */
+    private static final int MAX_SUPPRESSION_ENTRIES = 10_000;
+
     /**
      * 构造告警分发器。
      *
@@ -93,6 +96,17 @@ public class AlertDispatcher implements MetricsEventListener {
     }
 
     /**
+     * 异步任务被拒绝告警（0.5.0 新增，由默认拒绝任务处理器在队列拒绝时调用）。
+     *
+     * @param action  异步动作名
+     * @param handler Handler 方法标识
+     * @param error   拒绝原因摘要
+     */
+    public void publishAsyncTaskRejected(String action, String handler, String error) {
+        dispatch(GovernanceAlertEvent.asyncTaskRejected(action, handler, error));
+    }
+
+    /**
      * 分发一条告警：先做抑制判断，再逐个通知并隔离异常。
      */
     private void dispatch(GovernanceAlertEvent event) {
@@ -114,6 +128,9 @@ public class AlertDispatcher implements MetricsEventListener {
 
     /**
      * 判断同一 {@code (类型, apiKey)} 是否处于抑制窗口内。
+     *
+     * <p>抑制表有界：条目数超过 {@value #MAX_SUPPRESSION_ENTRIES} 时清理已出抑制窗口的条目，
+     * 防止 SpEL 参数维度限流等高基数 apiKey 场景下抑制表无限增长。
      */
     private boolean isSuppressed(GovernanceAlertEvent event) {
         if (suppressIntervalMs <= 0) {
@@ -122,8 +139,39 @@ public class AlertDispatcher implements MetricsEventListener {
         String key = event.getType() + "|" + event.getApiKey();
         long now = System.currentTimeMillis();
         Long last = lastDispatchTime.put(key, now);
+        if (lastDispatchTime.size() > MAX_SUPPRESSION_ENTRIES) {
+            evictExpiredSuppressions(now);
+        }
         // put 返回旧值；首次出现（旧值为 null）放行，其余按窗口判断
         return last != null && (now - last) < suppressIntervalMs;
+    }
+
+    /**
+     * 清理已出抑制窗口的条目。使用 {@code remove(key, value)} 两段式删除，
+     * 避免并发下误删同 key 更新的时间戳。
+     *
+     * <p>{@code ConcurrentHashMap} 弱一致迭代在删除过程中可能跳过部分条目，
+     * 因此循环清理直到一轮无删除或已回落到上限以内。
+     */
+    private void evictExpiredSuppressions(long now) {
+        boolean removedAny;
+        do {
+            removedAny = false;
+            for (Map.Entry<String, Long> entry : lastDispatchTime.entrySet()) {
+                Long last = entry.getValue();
+                if (last != null && (now - last) >= suppressIntervalMs
+                        && lastDispatchTime.remove(entry.getKey(), last)) {
+                    removedAny = true;
+                }
+            }
+        } while (removedAny && lastDispatchTime.size() > MAX_SUPPRESSION_ENTRIES);
+    }
+
+    /**
+     * 抑制表当前条目数（供测试与运维观测）。
+     */
+    int getSuppressionEntryCount() {
+        return lastDispatchTime.size();
     }
 
     /**

@@ -5,6 +5,8 @@ import io.github.biglv666.apigovernance.async.annotation.AsyncAction;
 import io.github.biglv666.apigovernance.async.annotation.AsyncHandler;
 import io.github.biglv666.apigovernance.async.event.AsyncEvent;
 import io.github.biglv666.apigovernance.async.event.AsyncPhase;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
@@ -27,33 +29,74 @@ import java.util.Set;
  */
 public final class AsyncHandlerRegistry implements SmartInitializingSingleton {
 
+    private static final Logger log = LoggerFactory.getLogger(AsyncHandlerRegistry.class);
+
     private static final Comparator<RegisteredAsyncHandler> HANDLER_ORDER =
             Comparator.comparingInt((RegisteredAsyncHandler handler) -> handler.info().order())
                     .thenComparing(handler -> handler.info().beanName())
                     .thenComparing(handler -> handler.info().method());
 
     private final ConfigurableListableBeanFactory beanFactory;
+    private final boolean ignoreUnmatchedHandlers;
     private volatile Map<HandlerKey, List<RegisteredAsyncHandler>> handlers = Map.of();
 
     public AsyncHandlerRegistry(ConfigurableListableBeanFactory beanFactory) {
+        this(beanFactory, false);
+    }
+
+    /**
+     * @param ignoreUnmatchedHandlers {@code true} 时 handler 引用不存在的 action 仅记 warn；
+     *                                {@code false}（默认）启动失败（fail-fast 防呆）。
+     */
+    public AsyncHandlerRegistry(ConfigurableListableBeanFactory beanFactory,
+                                boolean ignoreUnmatchedHandlers) {
         this.beanFactory = beanFactory;
+        this.ignoreUnmatchedHandlers = ignoreUnmatchedHandlers;
     }
 
     @Override
     public void afterSingletonsInstantiated() {
         Map<HandlerKey, List<RegisteredAsyncHandler>> discovered = new HashMap<>();
+        Set<String> declaredActions = new java.util.HashSet<>();
         for (String beanName : beanFactory.getBeanDefinitionNames()) {
             Class<?> beanType = beanFactory.getType(beanName, false);
             if (beanType == null || isInfrastructureType(beanType)) {
                 continue;
             }
-            validateActions(beanName, beanType);
+            validateActions(beanName, beanType, declaredActions);
             registerHandlers(beanName, beanType, discovered);
         }
+        validateHandlerActionsMatch(discovered, declaredActions);
         discovered.values().forEach(list -> list.sort(HANDLER_ORDER));
         Map<HandlerKey, List<RegisteredAsyncHandler>> immutable = new HashMap<>();
         discovered.forEach((key, value) -> immutable.put(key, List.copyOf(value)));
         handlers = Map.copyOf(immutable);
+    }
+
+    /**
+     * 交叉校验：所有 {@code @AsyncHandler} 引用的 action 必须存在对应的 {@code @AsyncAction}。
+     *
+     * <p>不匹配默认启动失败（fail-fast 防呆，典型错误是 action 名拼写错误导致 handler 永不执行）；
+     * {@code ignore-unmatched-handlers=true} 时降级为 warn 日志。
+     */
+    private void validateHandlerActionsMatch(Map<HandlerKey, List<RegisteredAsyncHandler>> discovered,
+                                             Set<String> declaredActions) {
+        Set<String> unmatched = new java.util.TreeSet<>();
+        for (HandlerKey key : discovered.keySet()) {
+            if (!declaredActions.contains(key.action())) {
+                unmatched.add(key.action());
+            }
+        }
+        if (unmatched.isEmpty()) {
+            return;
+        }
+        String message = "@AsyncHandler 引用了不存在的 @AsyncAction action: " + unmatched
+                + "（请检查 action 名拼写）";
+        if (ignoreUnmatchedHandlers) {
+            log.warn(message);
+        } else {
+            throw new IllegalStateException(message);
+        }
     }
 
     List<RegisteredAsyncHandler> getHandlers(String action, AsyncPhase phase) {
@@ -75,13 +118,14 @@ public final class AsyncHandlerRegistry implements SmartInitializingSingleton {
                 .toList();
     }
 
-    private void validateActions(String beanName, Class<?> beanType) {
+    private void validateActions(String beanName, Class<?> beanType, Set<String> declaredActions) {
         Map<Method, AsyncAction> actions = MethodIntrospector.selectMethods(beanType,
                 (MethodIntrospector.MetadataLookup<AsyncAction>) method ->
                         AnnotatedElementUtils.findMergedAnnotation(method, AsyncAction.class));
         actions.forEach((method, annotation) -> {
             requirePublic(beanName, method, "@AsyncAction");
             requireText(annotation.value(), beanName, method, "@AsyncAction value");
+            declaredActions.add(annotation.value());
         });
     }
 
