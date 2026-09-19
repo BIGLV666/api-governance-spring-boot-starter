@@ -322,4 +322,61 @@ class GovernanceManagementControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.enabled").value(true));
     }
+
+    @Test
+    void configReturnsAllFieldsIncludingScopedListsAndAsyncFlags() throws Exception {
+        // 回归：maskedConfig 曾漏拷 include/excludePackages 与 mutationsEnabled、
+        // ignoreUnmatchedHandlers、webContextEnrichment，/config 以默认值谎报运行时配置
+        ApiGovernanceProperties properties = new ApiGovernanceProperties();
+        properties.setIncludePackages(List.of("com.example.api"));
+        properties.setExcludePackages(List.of("com.example.internal"));
+        properties.getManagement().setMutationsEnabled(false);
+        properties.getAsync().setIgnoreUnmatchedHandlers(true);
+        properties.getAsync().setWebContextEnrichment(false);
+
+        MockMvc scoped = MockMvcBuilders.standaloneSetup(
+                        new GovernanceManagementController(properties, rateLimiter,
+                                new FilterChain(List.of(), List.of()), metricsRegistry, null, null))
+                .build();
+
+        scoped.perform(get("/api-governance/config"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.includePackages[0]").value("com.example.api"))
+                .andExpect(jsonPath("$.excludePackages[0]").value("com.example.internal"))
+                .andExpect(jsonPath("$.management.mutationsEnabled").value(false))
+                .andExpect(jsonPath("$.async.ignoreUnmatchedHandlers").value(true))
+                .andExpect(jsonPath("$.async.webContextEnrichment").value(false));
+    }
+
+    @Test
+    void metricsPaginationHandlesHugePageWithoutOverflow() throws Exception {
+        metricsRegistry.recordStart("com.x.Big1#x");
+        metricsRegistry.recordStart("com.x.Big2#x");
+        // 回归：(page-1)*size 的 int 乘法溢出曾使 fromIndex 变负、subList 抛越界异常（500）
+        mockMvc.perform(get("/api-governance/metrics").param("page", "42949674").param("size", "50"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.total").value(2))
+                .andExpect(jsonPath("$.items.length()").value(0));
+
+        mockMvc.perform(get("/api-governance/metrics").param("page", "4294969").param("size", "500"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(0));
+    }
+
+    @Test
+    @SuppressWarnings("deprecation")
+    void legacyFourArgConstructorRemainsSourceCompatible() throws Exception {
+        // 0.5.0 曾删除 4 参构造器破坏源码兼容；现以委托重载保留，异步端点按插件关闭处理
+        MockMvc legacy = MockMvcBuilders.standaloneSetup(
+                        new GovernanceManagementController(new ApiGovernanceProperties(), rateLimiter,
+                                new FilterChain(List.of(), List.of()), metricsRegistry))
+                .build();
+
+        legacy.perform(get("/api-governance/status"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rateLimiter").value("recording"));
+        legacy.perform(get("/api-governance/async/handlers"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.enabled").value(false));
+    }
 }

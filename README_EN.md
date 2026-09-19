@@ -479,6 +479,10 @@ Base path defaults to `/api-governance` (configurable):
 | DELETE | `/metrics/single?key=` | clear one API's metrics |
 
 > `key` is `fully.qualified.ClassName#method`, e.g. `com.example.UserController#get`.
+> `GET /config` masks sensitive fields (`management.auth-token`, `alert.webhook.secret-token`,
+> `alert.webhook.sign-secret`) as `******` when non-empty. Note that `alert.webhook.url` is returned
+> as-is — DingTalk/WeCom bot URLs may embed an `access_token` in the query string; exposing it is the
+> operator's decision, so enable the built-in token auth below in production.
 > Protect these endpoints in production — the built-in token auth (new in 0.2.0) is the simplest option:
 
 ```yaml
@@ -581,8 +585,10 @@ All new configuration defaults keep the 0.3.0 behaviour — no configuration cha
    if your build relied on receiving them transitively through this starter, declare them explicitly
    or trace reporting silently turns off (all other governance capabilities are unaffected);
 2. The Redis limiter Lua scripts now take the time from the Redis server (`TIME` command) for window
-   and token-refill decisions — clock drift across instances no longer affects limiting accuracy
-   (Redis 5+; always satisfied by the Spring Boot 3.2 baseline).
+   and token-refill decisions — clock drift across instances no longer affects limiting accuracy.
+   `TIME` is non-deterministic, so the scripts explicitly call `redis.replicate_commands()` to switch
+   to effect replication: Redis 3.2–4.x (verbatim script replication) is supported as well, and on
+   Redis 5+ the call is a harmless no-op (effect replication is already the default).
 
 ### Upgrading from 0.2.0 to 0.3.0
 

@@ -480,6 +480,8 @@ api:
 > `key` 即 API 唯一标识，格式为 `全限定类名#方法名`，例如 `com.example.UserController#get`。
 > `GET /config` 返回的配置已对敏感字段掩码（0.3.0 起）：`management.auth-token`、
 > `alert.webhook.secret-token`、`alert.webhook.sign-secret` 非空时以 `******` 返回。
+> 注意 `alert.webhook.url` 原样返回 —— 钉钉/企微等机器人地址的 query 参数中可能携带
+> access_token，是否对外暴露由使用方决定，生产环境务必开启下方令牌鉴权。
 > 生产环境建议开启内置令牌鉴权（0.2.0 新增），或继续通过网关鉴权 / IP 白名单保护：
 
 ```yaml
@@ -643,7 +645,9 @@ MQ 的 `traceparent`、`tracestate`、`baggage` 由框架写入消息 Header；�
    若宿主依赖传递获得了这两个 jar 且依赖 starter 的传递引入，升级后需**显式声明**这两个依赖，
    否则链路上报将静默关闭（治理其余能力不受影响）；
 2. Redis 限流 Lua 脚本改用 Redis 服务器时间（`TIME` 命令）判定窗口与令牌补充，
-   多实例时钟漂移不再影响限流精度（需 Redis 5+，Spring Boot 3.2 基线的场景均满足）。
+   多实例时钟漂移不再影响限流精度。`TIME` 属非确定性命令，脚本内已显式调用
+   `redis.replicate_commands()` 切换为效果复制，Redis 3.2–4.x（逐字复制模式）同样可用；
+   Redis 5+ 默认即效果复制，该调用幂等无害。
 
 ### 从 0.2.0 升级到 0.3.0
 

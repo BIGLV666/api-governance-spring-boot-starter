@@ -116,7 +116,7 @@ public class GovernanceAlertEvent {
         return type;
     }
 
-    /** API 唯一标识（限流器故障事件中为限流器名称）。 */
+    /** API 唯一标识（限流器故障事件中为限流器名称；异步任务拒绝事件中为异步动作名）。 */
     public String getApiKey() {
         return apiKey;
     }

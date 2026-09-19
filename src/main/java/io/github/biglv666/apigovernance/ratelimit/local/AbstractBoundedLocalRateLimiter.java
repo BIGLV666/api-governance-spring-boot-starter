@@ -131,21 +131,12 @@ abstract class AbstractBoundedLocalRateLimiter<T> implements RateLimiter {
             }
         }
         // 2) 无过期键时按 LRU 淘汰最旧的一批（约 1/16），摊薄持续新增键时的扫描开销
-        List<T> snapshot = new ArrayList<>(states.values());
-        snapshot.sort(Comparator.comparingLong(this::accessTime));
+        // 快照携带 key：按键直接 remove，避免对每个待淘汰状态做全表身份扫描（O(n²)）
+        List<Map.Entry<String, T>> snapshot = new ArrayList<>(states.entrySet());
+        snapshot.sort(Comparator.comparingLong(entry -> accessTime(entry.getValue())));
         int toRemove = Math.max(1, snapshot.size() / 16);
         for (int i = 0; i < toRemove && i < snapshot.size(); i++) {
-            removeState(snapshot.get(i));
-        }
-    }
-
-    /** 按「最近访问时间」从映射中移除指定状态（O(n) 定位键）。 */
-    private void removeState(T state) {
-        for (Map.Entry<String, T> entry : states.entrySet()) {
-            if (entry.getValue() == state) {
-                states.remove(entry.getKey());
-                return;
-            }
+            states.remove(snapshot.get(i).getKey());
         }
     }
 

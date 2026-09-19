@@ -23,7 +23,7 @@ import java.util.UUID;
  * key: ratelimit:window:{apiKey}
  * type: Sorted Set
  * score: 请求时间戳（毫秒）
- * member: 请求唯一 ID（时间戳-线程ID）
+ * member: 请求唯一 ID（UUID，全局唯一，避免同毫秒同线程请求被 zadd 覆盖）
  * </pre>
  *
  * <h3>Lua 脚本逻辑</h3>
@@ -51,7 +51,10 @@ public class RedisSlidingWindowRateLimiter implements RateLimiter {
      * 滑动窗口 Lua 脚本。
      * <p>KEYS[1]=key；ARGV[1]=阈值；ARGV[2]=窗口(秒)；ARGV[3]=请求唯一ID。
      * <p>当前时间取自 Redis 服务器（{@code TIME} 命令，秒+微秒）：多实例部署时应用节点
-     * 时钟漂移不再影响窗口精度（Redis 5+ 默认效果复制，脚本内非确定性命令安全）。
+     * 时钟漂移不再影响窗口精度。{@code TIME} 属非确定性命令，脚本内先显式
+     * {@code redis.replicate_commands()} 切换为效果复制，兼容 Redis 3.2–4.x
+     * （逐字复制模式下「非确定性命令后写命令」会被拒绝）；Redis 5+ 默认即效果复制，
+     * 该调用为幂等无害。
      * <p>返回 1 表示放行，0 表示拒绝。
      */
     private static final String LUA_SCRIPT =
@@ -60,6 +63,7 @@ public class RedisSlidingWindowRateLimiter implements RateLimiter {
             "local window = tonumber(ARGV[2])\n" +
             "local requestId = ARGV[3]\n" +
             "\n" +
+            "if redis.replicate_commands then redis.replicate_commands() end\n" +
             "local t = redis.call('TIME')\n" +
             "local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)\n" +
             "\n" +

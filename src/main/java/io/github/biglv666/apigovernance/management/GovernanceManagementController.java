@@ -96,6 +96,25 @@ public class GovernanceManagementController {
     }
 
     /**
+     * 构造管理控制器（0.4.x 兼容重载）。
+     *
+     * <p>异步观测相关端点按「异步插件关闭」处理。
+     *
+     * @param properties      全局配置
+     * @param rateLimiter     限流器（可能为 null）
+     * @param filterChain     过滤器链
+     * @param metricsRegistry 指标注册表
+     * @deprecated 0.5.0 起新增异步观测端点，请改用六参构造器
+     */
+    @Deprecated
+    public GovernanceManagementController(ApiGovernanceProperties properties,
+                                          RateLimiter rateLimiter,
+                                          FilterChain filterChain,
+                                          MetricsRegistry metricsRegistry) {
+        this(properties, rateLimiter, filterChain, metricsRegistry, null, null);
+    }
+
+    /**
      * 治理系统状态。
      */
     @GetMapping("/status")
@@ -260,7 +279,10 @@ public class GovernanceManagementController {
         }
         int safePage = Math.max(1, page == null ? 1 : page);
         int safeSize = size == null ? 50 : Math.min(Math.max(1, size), MAX_PAGE_SIZE);
-        int fromIndex = Math.min((safePage - 1) * safeSize, all.size());
+        // 用 long 计算 fromIndex：极端 page 值下 int 乘法会溢出为负，导致 subList 越界异常；
+        // 超出数据范围的页码统一返回空页（与合法的越后空页行为一致）
+        long fromIndexLong = (long) (safePage - 1) * safeSize;
+        int fromIndex = fromIndexLong >= all.size() ? all.size() : (int) fromIndexLong;
         int toIndex = Math.min(fromIndex + safeSize, all.size());
 
         Map<String, Object> body = new LinkedHashMap<>();
@@ -449,6 +471,8 @@ public class GovernanceManagementController {
     private ApiGovernanceProperties maskedConfig() {
         ApiGovernanceProperties masked = new ApiGovernanceProperties();
         masked.setEnabled(properties.isEnabled());
+        masked.setIncludePackages(new ArrayList<>(properties.getIncludePackages()));
+        masked.setExcludePackages(new ArrayList<>(properties.getExcludePackages()));
 
         ApiGovernanceProperties.Log srcLog = properties.getLog();
         ApiGovernanceProperties.Log dstLog = masked.getLog();
@@ -480,6 +504,7 @@ public class GovernanceManagementController {
         dstMgmt.setEnabled(srcMgmt.isEnabled());
         dstMgmt.setBasePath(srcMgmt.getBasePath());
         dstMgmt.setAuthHeader(srcMgmt.getAuthHeader());
+        dstMgmt.setMutationsEnabled(srcMgmt.isMutationsEnabled());
         // 鉴权令牌：非空即掩码，绝不回显明文
         dstMgmt.setAuthToken(maskIfPresent(srcMgmt.getAuthToken()));
 
@@ -492,6 +517,8 @@ public class GovernanceManagementController {
         dstAsync.setKeepAliveSeconds(srcAsync.getKeepAliveSeconds());
         dstAsync.setThreadNamePrefix(srcAsync.getThreadNamePrefix());
         dstAsync.setAwaitTerminationSeconds(srcAsync.getAwaitTerminationSeconds());
+        dstAsync.setIgnoreUnmatchedHandlers(srcAsync.isIgnoreUnmatchedHandlers());
+        dstAsync.setWebContextEnrichment(srcAsync.isWebContextEnrichment());
 
         ApiGovernanceProperties.Alert srcAlert = properties.getAlert();
         ApiGovernanceProperties.Alert dstAlert = masked.getAlert();
