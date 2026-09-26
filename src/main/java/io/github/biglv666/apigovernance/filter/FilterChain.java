@@ -68,9 +68,12 @@ public class FilterChain {
                     return false;
                 }
             } catch (Exception e) {
-                // 前置过滤器异常视为拒绝，避免未预期的业务继续执行
+                // 前置过滤器异常视为拒绝（fail-close），避免未预期的业务继续执行。
+                // 状态码用 500 而非默认 429：「治理自身故障」与「治理主动限流拒绝」必须可区分，
+                // 否则过滤器 bug 会伪装成限流，把排障方向带偏
                 log.error("前置过滤器执行异常 - 过滤器: {}, API: {}",
                         filter.getName(), context.getApiKey(), e);
+                context.setRejectStatus(500);
                 context.setRejectReason("过滤器异常: " + filter.getName());
                 return false;
             }

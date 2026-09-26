@@ -123,4 +123,25 @@ class AlertDispatcherTest {
         assertTrue(dispatcher.getSuppressionEntryCount() <= 10_000,
                 "抑制表应保持有界，实际: " + dispatcher.getSuppressionEntryCount());
     }
+
+    @Test
+    void suppressionIsFixedWindowAndAlertsAgainAfterWindowPasses() throws Exception {
+        // 回归：抑制曾在每次事件时刷新时间戳（滑动续期），持续故障只告警一次后彻底静默；
+        // 固定窗口语义下窗口过期后应再次分发
+        CollectingNotifier notifier = new CollectingNotifier();
+        AlertDispatcher dispatcher = new AlertDispatcher(List.of(notifier), 40, 1000);
+
+        // 窗口内高频重复事件：窗口不续期，只在首报时发一次（总耗时远小于窗口）
+        dispatcher.onResult("api", 1500, true, true, "GET", "/x", null);
+        for (int i = 0; i < 10; i++) {
+            dispatcher.onResult("api", 1500, true, true, "GET", "/x", null);
+            Thread.sleep(2);
+        }
+        assertEquals(1, notifier.events.size(), "抑制窗口内不应重复告警");
+
+        // 窗口滑出后新事件再次告警（持续故障可被周期性重新感知）
+        Thread.sleep(50);
+        dispatcher.onResult("api", 1500, true, true, "GET", "/x", null);
+        assertEquals(2, notifier.events.size(), "抑制窗口过期后应再次告警");
+    }
 }

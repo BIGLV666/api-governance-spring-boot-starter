@@ -28,7 +28,11 @@ import org.springframework.expression.spel.support.SimpleEvaluationContext;
 import org.springframework.web.bind.annotation.RequestMapping;
 
 import java.lang.reflect.Method;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
 
@@ -82,6 +86,12 @@ public class GovernanceAspect {
 
     /** 限流键表达式缓存（key = Method）：编译结果与参数名按方法缓存，避免每请求重复解析。 */
     private final Map<Method, RateLimitKeyExpression> rateLimitKeyCache = new ConcurrentHashMap<>();
+
+    /**
+     * 重载映射方法名缓存（key = 目标类）：类内存在同名请求映射方法时，apiKey 需要追加
+     * 参数类型后缀消歧，否则两个重载端点会共享同一限流键与同一份指标。
+     */
+    private final Map<Class<?>, Set<String>> overloadedMethodNamesCache = new ConcurrentHashMap<>();
 
     /**
      * 构造切面。
@@ -139,7 +149,7 @@ public class GovernanceAspect {
         }
 
         // 5. 构建上下文并解析配置
-        String apiKey = targetClass.getName() + "#" + method.getName();
+        String apiKey = buildApiKey(targetClass, method);
         FilterContext context = new FilterContext(joinPoint, apiKey, method, targetClass,
                 joinPoint.getArgs());
         injectHttpRequest(context);
@@ -222,6 +232,54 @@ public class GovernanceAspect {
         } catch (Throwable ignored) {
             // 非 Servlet 环境：path/httpMethod 保持注解推导值（由 MetadataCollectorFilter 填充）
         }
+    }
+
+    /**
+     * 构建唯一 API 标识（全限定类名#方法名）。
+     *
+     * <p>类内存在<b>同名</b>请求映射方法（重载端点）时，方法名不足以唯一标识——
+     * 两个重载端点会共享同一限流键（配额互相消耗）与同一份指标。此时追加参数类型
+     * 简名后缀消歧：{@code com.x.UserController#get(Long)}。无重载的常规类保持
+     * {@code com.x.UserController#get} 的既有格式，管理接口的 key 契约不变。
+     */
+    private String buildApiKey(Class<?> targetClass, Method method) {
+        String base = targetClass.getName() + "#" + method.getName();
+        Set<String> overloadedNames = overloadedMethodNamesCache.computeIfAbsent(targetClass,
+                this::resolveOverloadedMappedMethodNames);
+        if (!overloadedNames.contains(method.getName())) {
+            return base;
+        }
+        Class<?>[] parameterTypes = method.getParameterTypes();
+        if (parameterTypes.length == 0) {
+            return base + "()";
+        }
+        StringBuilder suffix = new StringBuilder("(");
+        for (int i = 0; i < parameterTypes.length; i++) {
+            if (i > 0) {
+                suffix.append(',');
+            }
+            suffix.append(parameterTypes[i].getSimpleName());
+        }
+        return base + suffix.append(')');
+    }
+
+    /**
+     * 找出目标类中「被多个请求映射方法共用」的方法名集合（重载判定，按类缓存一次）。
+     */
+    private Set<String> resolveOverloadedMappedMethodNames(Class<?> targetClass) {
+        Map<String, Integer> nameCounts = new HashMap<>();
+        for (Method method : targetClass.getMethods()) {
+            if (isMappedMethod(method)) {
+                nameCounts.merge(method.getName(), 1, Integer::sum);
+            }
+        }
+        Set<String> overloaded = new HashSet<>();
+        for (Map.Entry<String, Integer> entry : nameCounts.entrySet()) {
+            if (entry.getValue() > 1) {
+                overloaded.add(entry.getKey());
+            }
+        }
+        return overloaded;
     }
 
     /**

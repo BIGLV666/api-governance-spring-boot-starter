@@ -3,7 +3,10 @@ package io.github.biglv666.apigovernance.ratelimit.redis;
 import io.github.biglv666.apigovernance.ratelimit.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.connection.RedisClusterConnection;
+import org.springframework.data.redis.connection.RedisClusterNode;
 import org.springframework.data.redis.core.Cursor;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -12,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * Redis 滑动窗口限流器（分布式）。
@@ -142,21 +146,46 @@ public class RedisSlidingWindowRateLimiter implements RateLimiter {
     /**
      * SCAN 游标遍历并删除本限流器前缀下的全部 key。
      * 每批 {@value #SCAN_BATCH_SIZE} 条，删除也分批提交，控制单次命令耗时。
+     *
+     * <p><b>集群兼容</b>：{@code RedisTemplate#scan} 只绑定初始连接所在的节点，
+     * 集群模式下会漏掉其余 master 上的键；因此检测到集群连接时遍历全部 master
+     * 节点逐个 SCAN（删除仍按 key hash 自动路由到所属节点）。
      */
     private void scanAndDeleteAll() {
-        List<String> batch = new ArrayList<>(SCAN_BATCH_SIZE);
-        try (Cursor<String> cursor = redisTemplate.scan(
-                ScanOptions.scanOptions().match(KEY_PREFIX + "*").count(SCAN_BATCH_SIZE).build())) {
+        redisTemplate.execute((RedisCallback<Void>) connection -> {
+            ScanOptions options = ScanOptions.scanOptions()
+                    .match(KEY_PREFIX + "*").count(SCAN_BATCH_SIZE).build();
+            if (connection instanceof RedisClusterConnection clusterConnection) {
+                for (RedisClusterNode node : clusterConnection.clusterGetNodes()) {
+                    if (node.isMaster()) {
+                        scanAndDeleteBatch(clusterConnection.scan(node, options),
+                                keys -> clusterConnection.del(keys.toArray(new byte[0][])));
+                    }
+                }
+            } else {
+                scanAndDeleteBatch(connection.keyCommands().scan(options),
+                        keys -> connection.keyCommands().del(keys.toArray(new byte[0][])));
+            }
+            return null;
+        });
+    }
+
+    /**
+     * 消费一个 SCAN 游标并分批删除，批大小 {@value #SCAN_BATCH_SIZE}。
+     */
+    private void scanAndDeleteBatch(Cursor<byte[]> cursor, Consumer<List<byte[]>> deleter) {
+        List<byte[]> batch = new ArrayList<>(SCAN_BATCH_SIZE);
+        try (cursor) {
             while (cursor.hasNext()) {
                 batch.add(cursor.next());
                 if (batch.size() >= SCAN_BATCH_SIZE) {
-                    redisTemplate.delete(batch);
+                    deleter.accept(batch);
                     batch.clear();
                 }
             }
         }
         if (!batch.isEmpty()) {
-            redisTemplate.delete(batch);
+            deleter.accept(batch);
         }
     }
 }

@@ -1,6 +1,5 @@
 package io.github.biglv666.apigovernance.exception;
 
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -10,22 +9,26 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 治理异常全局处理器。
+ * 治理拒绝异常的专用处理器。
  *
- * <p>捕获 {@link GovernanceException} 并转换为统一结构的标准 JSON 响应，例如限流拒绝：
+ * <p><b>职责边界</b>：只处理框架自有类型 {@link GovernanceException}（前置过滤器链短路的
+ * 统一出口），并转换为统一结构的标准 JSON 响应，例如限流拒绝：
  * <pre>
  * {
  *   "success": false,
- *   "code": "RATE_LIMITED",
+ *   "code": "REJECTED",
  *   "message": "请求过于频繁，请稍后重试",
  *   "status": 429,
  *   "timestamp": "2024-01-01T00:00:00Z"
  * }
  * </pre>
  *
+ * <p>刻意<b>不</b>兜底宿主应用的任何异常（如 {@code IllegalArgumentException}）：
+ * Starter 注册的全局 advice 会静默改写宿主的异常处理行为（500 变 400、抢占宿主
+ * 自定义 advice），属于框架越界。宿主异常一律交还宿主自身体系处理。
+ *
  * <h3>维护说明</h3>
- * <p>如需调整响应结构，只需修改 {@link #buildBody}；如需支持更多异常类型，
- * 新增对应的 {@code @ExceptionHandler} 方法即可。
+ * <p>如需调整响应结构，只需修改 {@link #buildBody}。
  *
  * @author API Governance Team
  * @since 1.0
@@ -43,20 +46,6 @@ public class GovernanceExceptionHandler {
     public ResponseEntity<Map<String, Object>> handleGovernanceException(GovernanceException ex) {
         Map<String, Object> body = buildBody(ex.getCode(), ex.getMessage(), ex.getStatus());
         return ResponseEntity.status(ex.getStatus()).body(body);
-    }
-
-    /**
-     * 兜底处理：若控制器以 {@link IllegalArgumentException} 等形式抛出，
-     * 也可在这里转换为 400，避免治理管道之外的非预期异常裸露给前端。
-     *
-     * @param ex 非法参数异常
-     * @return 400 响应
-     */
-    @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<Map<String, Object>> handleIllegalArgument(IllegalArgumentException ex) {
-        Map<String, Object> body = buildBody("BAD_REQUEST", ex.getMessage(),
-                HttpStatus.BAD_REQUEST.value());
-        return ResponseEntity.badRequest().body(body);
     }
 
     /**

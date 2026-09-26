@@ -61,9 +61,12 @@
             <artifactId>jakarta.servlet-api</artifactId>
             <scope>provided</scope>
         </dependency>
+        <!-- Micrometer 指标桥接（可选）：需要 /actuator/prometheus 等标准指标生态的宿主引入；
+             未引入时治理核心能力（限流/日志/内存指标/告警/异步钩子）完全可用，桥接 Bean 不装配 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
+            <optional>true</optional>
         </dependency>
         <!-- 链路追踪（0.4.0 起可选）：需要 OpenTelemetry 链路上报的宿主请显式引入，
              未引入时治理核心能力（限流/指标/日志/告警）完全可用 -->

@@ -19,8 +19,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * {@link #publishRateLimiterFailure(String, String)} 直接触发。
  *
  * <h3>告警风暴抑制</h3>
- * <p>同一 {@code (告警类型, apiKey)} 在 {@code suppressIntervalMs} 窗口内只分发一次
- * （首个事件生效，后续被静默丢弃并计数）。抑制状态保存在内存中，随进程重启清零。
+ * <p><b>固定窗口</b>语义：同一 {@code (告警类型, apiKey)} 在 {@code suppressIntervalMs}
+ * 窗口内只分发一次（首个事件生效，窗口内后续事件被静默丢弃且不续期）；窗口过后若
+ * 问题仍存在（新事件到达），会再次分发。持续故障因此按窗口周期性重新告警，
+ * 而不是只在首次告警后彻底静默。抑制状态保存在内存中，随进程重启清零。
  *
  * <h3>稳定性契约</h3>
  * <ul>
@@ -127,7 +129,11 @@ public class AlertDispatcher implements MetricsEventListener {
     }
 
     /**
-     * 判断同一 {@code (类型, apiKey)} 是否处于抑制窗口内。
+     * 判断同一 {@code (类型, apiKey)} 是否处于抑制窗口内（固定窗口语义）。
+     *
+     * <p>先读后写：窗口内的事件只被静默丢弃，<b>绝不刷新</b>已记录的分发时间戳——
+     * 若在判断前先 {@code put(key, now)} 续期，持续故障（如 Redis 宕机）的窗口会被
+     * 无限重置，导致只告警一次后彻底静默。仅当放行（首报或窗口已过）时才记录新时间戳。
      *
      * <p>抑制表有界：条目数超过 {@value #MAX_SUPPRESSION_ENTRIES} 时清理已出抑制窗口的条目，
      * 防止 SpEL 参数维度限流等高基数 apiKey 场景下抑制表无限增长。
@@ -138,12 +144,15 @@ public class AlertDispatcher implements MetricsEventListener {
         }
         String key = event.getType() + "|" + event.getApiKey();
         long now = System.currentTimeMillis();
-        Long last = lastDispatchTime.put(key, now);
+        Long last = lastDispatchTime.get(key);
+        if (last != null && (now - last) < suppressIntervalMs) {
+            return true;
+        }
+        lastDispatchTime.put(key, now);
         if (lastDispatchTime.size() > MAX_SUPPRESSION_ENTRIES) {
             evictExpiredSuppressions(now);
         }
-        // put 返回旧值；首次出现（旧值为 null）放行，其余按窗口判断
-        return last != null && (now - last) < suppressIntervalMs;
+        return false;
     }
 
     /**

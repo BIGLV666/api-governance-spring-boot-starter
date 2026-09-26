@@ -11,8 +11,9 @@ import java.util.Arrays;
 /**
  * 日志记录过滤器（后置，order = 500）。
  *
- * <p>负责输出「响应情况」日志：成功/失败、耗时、异常信息等。默认对所有被拦截请求开启，
+ * <p>负责输出「响应情况」日志：成功/失败/被拒绝、耗时、异常信息等。默认对所有被拦截请求开启，
  * 可通过 {@code @NoLog} 注解或 {@code api.governance.log.enabled=false} 关闭。
+ * 前置过滤器短路拒绝的请求单独以 warn 级别记录状态码与拒绝原因，不与业务失败混淆。
  *
  * <p>入参与响应体的输出默认关闭（避免敏感信息与超大日志），可分别通过
  * {@code api.governance.log.log-request-params} 与 {@code api.governance.log.log-response} 开启。
@@ -43,6 +44,15 @@ public class LoggingFilter implements PostFilter {
         String apiKey = context.getApiKey();
         String httpMethod = context.getHttpMethod();
         String path = context.getPath();
+
+        if (context.isRejected()) {
+            // 前置短路拒绝：独立于业务失败，warn 级别并输出真实拒绝原因与状态码
+            // （此时 error 为框架 GovernanceException，message 是常量 "REJECTED"，不含原因）
+            log.warn("[API] {} {} - {} - 已拒绝 - 状态: {} - 原因: {} - 耗时: {}ms",
+                    httpMethod, path, apiKey, context.getRejectStatus(),
+                    context.getRejectReason(), elapsed);
+            return;
+        }
 
         if (context.getError() == null) {
             log.info("[API] {} {} - {} - 成功 - 耗时: {}ms",

@@ -30,7 +30,7 @@ public class GovernanceTestController {
 
     @GetMapping("/boom")
     public String boom() {
-        // IllegalArgumentException 由内置 GovernanceExceptionHandler 转为 400
+        // 宿主异常不归 Starter 的 advice 管：按容器默认行为转为 500
         throw new IllegalArgumentException("boom");
     }
 

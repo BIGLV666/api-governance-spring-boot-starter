@@ -233,6 +233,8 @@ api.governance.rate-limit.algorithm: custom
 ### 4. 限流颗粒度（限流键解析器）
 
 默认按**接口（方法）维度**限流：限流键 = `全限定类名#方法名`，同一接口的所有请求共享配额。
+类内存在同名映射方法（重载端点）时，键自动追加参数类型消歧（如 `com.x.UserController#get(Long)`），
+避免两个重载端点互相消耗配额。
 若想切换到**用户维度**、**IP 维度**、**接口+用户维度**等，实现 `RateLimitKeyResolver` 并注册 Bean 即可：
 
 ```java
@@ -270,7 +272,10 @@ public Token login(@RequestBody LoginRequest request) { ... }
 - 最终限流键 = `全限定类名#方法名:表达式结果`；
 - 表达式在受限的 `SimpleEvaluationContext` 中求值：**不允许**类型引用、构造器调用与 Bean 引用；
 - 表达式解析或求值失败时自动回退接口级限流（warn 日志），不影响业务；
-- 需要结合请求头、安全上下文等复杂键时，仍建议实现 `RateLimitKeyResolver` Bean。
+- 需要结合请求头、安全上下文等复杂键时，仍建议实现 `RateLimitKeyResolver` Bean；
+- **安全边界**：表达式结果由客户端可控输入派生时（如用户名、IP 等高基数参数），
+  每个新取值都从满配额开始，「按参数限流」只能用于**租户间公平性**，不能作为防爆破等
+  安全边界使用；此类场景应叠加接口级总配额或实现 `RateLimitKeyResolver` 组合 IP 等低基数维度。
 
 ### 6. 自定义限流拒绝响应（0.2.0 新增）
 
@@ -477,11 +482,11 @@ api:
 | DELETE | `/metrics` | 清空全部指标 |
 | DELETE | `/metrics/single?key=` | 清空指定 API 指标 |
 
-> `key` 即 API 唯一标识，格式为 `全限定类名#方法名`，例如 `com.example.UserController#get`。
+> `key` 即 API 唯一标识，格式为 `全限定类名#方法名`，例如 `com.example.UserController#get`；
+> 类内存在同名重载映射方法时追加参数类型后缀，例如 `com.example.UserController#get(Long)`。
 > `GET /config` 返回的配置已对敏感字段掩码（0.3.0 起）：`management.auth-token`、
-> `alert.webhook.secret-token`、`alert.webhook.sign-secret` 非空时以 `******` 返回。
-> 注意 `alert.webhook.url` 原样返回 —— 钉钉/企微等机器人地址的 query 参数中可能携带
-> access_token，是否对外暴露由使用方决定，生产环境务必开启下方令牌鉴权。
+> `alert.webhook.secret-token`、`alert.webhook.sign-secret` 非空时以 `******` 返回；
+> `alert.webhook.url` 的 query 参数（可能携带机器人 access_token）同样以 `******` 掩码。
 > 生产环境建议开启内置令牌鉴权（0.2.0 新增），或继续通过网关鉴权 / IP 白名单保护：
 
 ```yaml
@@ -609,7 +614,7 @@ MQ 的 `traceparent`、`tracestate`、`baggage` 由框架写入消息 Header；�
 | spring-boot-starter-aop | AOP + 核心容器 | 否 |
 | spring-web | @RestController 等 Web 注解 | 否 |
 | jakarta.servlet-api | 管理接口鉴权过滤器（provided，运行期由宿主容器提供） | 否（不传递） |
-| spring-boot-starter-actuator | Observation、追踪与 Micrometer 指标 | 否 |
+| spring-boot-starter-actuator | Micrometer 指标桥接（可选，未引入时桥接 Bean 不装配，治理能力不受影响） | 是 |
 | micrometer-tracing-bridge-otel | OpenTelemetry bridge（0.4.0 起可选） | 是 |
 | opentelemetry-exporter-otlp | OTLP 链路上报（0.4.0 起可选） | 是 |
 | spring-kafka | Kafka 消息链路适配（宿主使用 Kafka 时激活） | 是 |

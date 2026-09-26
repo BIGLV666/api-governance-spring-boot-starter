@@ -52,6 +52,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -114,8 +115,12 @@ public class ApiGovernanceAutoConfiguration {
     /**
      * Micrometer 指标桥接监听器：把治理事件同步为标准 Micrometer Counter / Timer，
      * 供 /actuator/prometheus 等标准生态采集。容器中没有 MeterRegistry 时本 Bean 为空转实现。
+     *
+     * <p>{@code spring-boot-starter-actuator} 为可选依赖：类路径无 Micrometer 时
+     * 整组桥接 Bean 不装配（治理核心能力不受影响）。
      */
     @Bean
+    @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
     @ConditionalOnProperty(prefix = "api.governance.metrics", name = "micrometer-enabled",
             havingValue = "true", matchIfMissing = true)
     public MicrometerMetricsEventListener micrometerMetricsEventListener(
@@ -128,6 +133,7 @@ public class ApiGovernanceAutoConfiguration {
      * 容器中没有 MeterRegistry 时不注册（返回 NullBean）。
      */
     @Bean(name = "apiGovernanceTrackedApisGauge")
+    @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
     @ConditionalOnProperty(prefix = "api.governance.metrics", name = "micrometer-enabled",
             havingValue = "true", matchIfMissing = true)
     public Gauge apiGovernanceTrackedApisGauge(ObjectProvider<MeterRegistry> meterRegistry,
@@ -149,6 +155,7 @@ public class ApiGovernanceAutoConfiguration {
      * 容器中没有 MeterRegistry 时不创建（异步链路零指标开销）。
      */
     @Bean
+    @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
     @ConditionalOnProperty(prefix = "api.governance.metrics", name = "micrometer-enabled",
             havingValue = "true", matchIfMissing = true)
     public MicrometerAsyncExecutionListener micrometerAsyncExecutionListener(
@@ -228,6 +235,36 @@ public class ApiGovernanceAutoConfiguration {
         }
         log.info("配置限流器: 本机令牌桶 (maxEntries: {})", properties.getRateLimit().getMaxEntries());
         return new TokenBucketRateLimiter(properties.getRateLimit().getMaxEntries());
+    }
+
+    /**
+     * 限流器装配完整性守卫：{@code type=redis} 但容器中不存在任何 {@link RateLimiter} 时
+     * 启动失败（fail-fast 防呆）。
+     *
+     * <p>背景：Redis 限流器装配嵌套在 {@code @ConditionalOnClass(StringRedisTemplate)} 的
+     * 内部配置里，宿主配置了 {@code type=redis} 却忘记引入（可选的）Redis 依赖时，Redis
+     * 配置类被整体跳过、本机限流器也因 type 不匹配不创建，容器里没有任何限流器——
+     * 此前只会产生一条运行时 warn，所有 {@code @RateLimit} 静默失效。本守卫把该配置错误
+     * 提前到启动期暴露。用户自定义 {@code RateLimiter} Bean 同样能让守卫通过。
+     */
+    @Bean
+    public SmartInitializingSingleton rateLimiterPresenceGuard(ApiGovernanceProperties properties,
+                                                               ConfigurableListableBeanFactory beanFactory) {
+        return () -> {
+            if (!properties.getFilters().isRateLimit()) {
+                // 限流过滤器被关闭时限流器本就不会被使用，不校验
+                return;
+            }
+            if (!"redis".equalsIgnoreCase(properties.getRateLimit().getType())) {
+                return;
+            }
+            if (beanFactory.getBeanNamesForType(RateLimiter.class).length == 0) {
+                throw new IllegalStateException(
+                        "api.governance.rate-limit.type=redis 但容器中不存在任何 RateLimiter："
+                                + "请引入 org.springframework.boot:spring-boot-starter-data-redis 依赖，"
+                                + "或将 type 改为 local");
+            }
+        };
     }
 
     // ==================== 内置过滤器 ====================
@@ -442,9 +479,16 @@ public class ApiGovernanceAutoConfiguration {
     public FilterRegistrationBean<GovernanceManagementAuthFilter> governanceManagementAuthFilter(
             ApiGovernanceProperties properties) {
         ApiGovernanceProperties.Management management = properties.getManagement();
+        String basePath = management.getBasePath();
+        // Servlet URL pattern 必须以 / 开头：校验前置给出指向配置项的明确报错，
+        // 避免落到容器深处抛出难懂的 Invalid URL pattern
+        if (basePath == null || !basePath.startsWith("/")) {
+            throw new IllegalStateException(
+                    "api.governance.management.base-path 必须以 / 开头，当前值: " + basePath);
+        }
         GovernanceManagementAuthFilter filter = new GovernanceManagementAuthFilter(properties);
         FilterRegistrationBean<GovernanceManagementAuthFilter> registration = new FilterRegistrationBean<>(filter);
-        registration.addUrlPatterns(management.getBasePath() + "/*");
+        registration.addUrlPatterns(basePath + "/*");
         registration.setEnabled(management.isAuthEnabled());
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 200);
         if (management.isAuthEnabled()) {

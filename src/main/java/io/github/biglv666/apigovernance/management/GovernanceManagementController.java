@@ -134,10 +134,10 @@ public class GovernanceManagementController {
     /**
      * 当前配置（敏感字段已掩码）。
      *
-     * <p>{@code management.auth-token} 与 {@code alert.webhook.secret-token} 非空时以
-     * {@value #MASK} 返回，避免令牌经管理接口明文回显泄露；其余配置项原样输出。
-     * 注意 {@code alert.webhook.url} 原样返回 —— 钉钉/企微等机器人地址的 query 参数中
-     * 可能携带 access_token，是否对外暴露由使用方决定（生产环境建议开启管理接口鉴权）。
+     * <p>{@code management.auth-token}、{@code alert.webhook.secret-token} 与
+     * {@code alert.webhook.sign-secret} 非空时以 {@value #MASK} 返回；
+     * {@code alert.webhook.url} 的 query 参数（可能携带机器人 access_token）同样掩码，
+     * 仅保留协议、主机与路径；其余配置项原样输出。
      */
     @GetMapping("/config")
     public ApiGovernanceProperties config() {
@@ -527,7 +527,9 @@ public class GovernanceManagementController {
         ApiGovernanceProperties.Webhook srcWebhook = srcAlert.getWebhook();
         ApiGovernanceProperties.Webhook dstWebhook = dstAlert.getWebhook();
         dstWebhook.setEnabled(srcWebhook.isEnabled());
-        dstWebhook.setUrl(srcWebhook.getUrl());
+        // webhook 地址的 query 参数（如钉钉机器人的 access_token）属于敏感凭据，
+        // 只保留协议与主机路径供诊断，query 部分统一掩码
+        dstWebhook.setUrl(maskUrlQuery(srcWebhook.getUrl()));
         dstWebhook.setTimeoutMs(srcWebhook.getTimeoutMs());
         dstWebhook.setPlatform(srcWebhook.getPlatform());
         // Webhook 令牌与加签密钥：非空即掩码，绝不回显明文
@@ -574,6 +576,19 @@ public class GovernanceManagementController {
      */
     private String maskIfPresent(String value) {
         return (value != null && !value.trim().isEmpty()) ? MASK : value;
+    }
+
+    /**
+     * 掩码 URL 的 query 部分：钉钉/企微/飞书机器人地址的 query 中通常携带 access_token
+     * 等机器人凭据，管理接口回显时只保留协议、主机与路径，query 统一替换为 {@value MASK}。
+     * 无 query 的地址原样返回。
+     */
+    private String maskUrlQuery(String url) {
+        if (url == null || url.isEmpty()) {
+            return url;
+        }
+        int queryStart = url.indexOf('?');
+        return queryStart >= 0 ? url.substring(0, queryStart) + "?" + MASK : url;
     }
 
     /**

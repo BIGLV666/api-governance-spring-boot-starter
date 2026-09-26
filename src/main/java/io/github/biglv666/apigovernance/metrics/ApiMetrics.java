@@ -173,13 +173,16 @@ public class ApiMetrics {
     }
 
     /**
-     * 计算平均耗时（毫秒），无请求时返回 0。
+     * 计算平均耗时（毫秒），无真实执行的请求时返回 0。
+     *
+     * <p>分母为成功 + 失败数（真实执行过业务方法的请求）：被拒绝的请求计入
+     * {@code totalRequests} 但不产生耗时（elapsed 为 0），计入分母会稀释平均值。
      *
      * @return 平均耗时
      */
     public double getAvgElapsedMs() {
-        long total = totalRequests.get();
-        return total == 0 ? 0 : (double) totalElapsedMs.get() / total;
+        long executed = successRequests.get() + failRequests.get();
+        return executed == 0 ? 0 : (double) totalElapsedMs.get() / executed;
     }
 
     /**
