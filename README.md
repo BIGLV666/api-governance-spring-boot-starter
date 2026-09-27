@@ -1,5 +1,7 @@
 # API Governance Spring Boot Starter
 
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.biglv666/api-governance-spring-boot-starter)](https://central.sonatype.com/artifact/io.github.biglv666/api-governance-spring-boot-starter) [![CI](https://github.com/BIGLV666/api-governance-spring-boot-starter/actions/workflows/ci.yml/badge.svg)](https://github.com/BIGLV666/api-governance-spring-boot-starter/actions/workflows/ci.yml)
+
 > **核心理念：一切皆插件** —— 一个开箱即用、可自定义插拔的轻量级 API 治理 Starter。
 
 [English](README_EN.md) | 中文
