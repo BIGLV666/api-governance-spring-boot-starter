@@ -619,7 +619,7 @@ Two internal changes worth knowing:
 ## 14. Docs
 
 - [中文文档](./README.md)：Chinese version of this document.
-- [ASYNC_ACTIONS.md](./ASYNC_ACTIONS.md)：async action contract.
+- [ASYNC_ACTIONS.md](./docs/ASYNC_ACTIONS.md)：async action contract.
 - [examples/api-governance-example](./examples/api-governance-example)：minimal runnable demo.
 
 ## 15. Build

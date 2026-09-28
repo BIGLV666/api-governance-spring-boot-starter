@@ -1,0 +1,27 @@
+# 故障演练专用配置（配合 drills/README.md 使用）
+#   mvn spring-boot:run -Dspring-boot.run.profiles=drill
+# 与默认 application.yml 的差异全部收敛在本文件，默认启动行为不受影响。
+server:
+  port: 8081                       # 避开常规示例端口，便于与 PaperWise(8080) 并存
+
+spring:
+  data:
+    redis:
+      host: localhost
+      port: 6380                   # 演练专用 Redis：docker run -d -p 6380:6379 --name gov-drill-redis redis:7-alpine
+      timeout: 1s                  # 关键：不配超时（默认 60s）时 Redis 故障会把请求线程拖住，
+                                   # fail-open 形同虚设；演练刻意暴露这一点
+
+api:
+  governance:
+    rate-limit:
+      type: redis                  # 切换分布式限流，便于演练 Redis 故障降级
+      algorithm: token-bucket
+      fail-strategy: open          # 默认 fail-open；fail-close 演练：
+                                   # -Dspring-boot.run.jvmArguments=-Dapi.governance.rate-limit.fail-strategy=close
+    alert:
+      suppress-interval-ms: 5000   # 缩短抑制窗口，便于一趟观察「抑制 → 恢复」完整生命周期
+    async:
+      core-pool-size: 1
+      max-pool-size: 1
+      queue-capacity: 1            # 极小池：并发 3 个旁路任务即触发队列拒绝告警
