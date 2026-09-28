@@ -5,8 +5,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.connection.RedisClusterConnection;
 import org.springframework.data.redis.connection.RedisClusterNode;
+import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.core.Cursor;
-import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -159,9 +159,16 @@ public class RedisTokenBucketRateLimiter implements RateLimiter {
      * <p><b>集群兼容</b>：{@code RedisTemplate#scan} 只绑定初始连接所在的节点，
      * 集群模式下会漏掉其余 master 上的键；因此检测到集群连接时遍历全部 master
      * 节点逐个 SCAN（删除仍按 key hash 自动路由到所属节点）。
+     *
+     * <p><b>连接获取</b>：必须经 {@code connectionFactory.getConnection()} 取原始连接——
+     * {@code redisTemplate.execute(RedisCallback)} 会把连接包装成 {@code StringRedisConnection}
+     * 装饰代理，其 {@code instanceof RedisClusterConnection} 恒为 false，集群分支永远不会命中
+     * （该缺陷由集群集成测试 RedisClusterRateLimiterIntegrationTest 发现）。
+     * 用完必须 {@code close()}（原生连接不带模板的自动关闭语义）。
      */
     private void scanAndDeleteAll() {
-        redisTemplate.execute((RedisCallback<Void>) connection -> {
+        RedisConnection connection = redisTemplate.getConnectionFactory().getConnection();
+        try {
             ScanOptions options = ScanOptions.scanOptions()
                     .match(KEY_PREFIX + "*").count(SCAN_BATCH_SIZE).build();
             if (connection instanceof RedisClusterConnection clusterConnection) {
@@ -175,8 +182,9 @@ public class RedisTokenBucketRateLimiter implements RateLimiter {
                 scanAndDeleteBatch(connection.keyCommands().scan(options),
                         keys -> connection.keyCommands().del(keys.toArray(new byte[0][])));
             }
-            return null;
-        });
+        } finally {
+            connection.close();
+        }
     }
 
     /**
