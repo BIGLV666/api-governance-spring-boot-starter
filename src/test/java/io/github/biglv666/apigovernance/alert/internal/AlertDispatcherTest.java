@@ -125,23 +125,101 @@ class AlertDispatcherTest {
     }
 
     @Test
-    void suppressionIsFixedWindowAndAlertsAgainAfterWindowPasses() throws Exception {
+    void suppressionIsFixedWindowAndAlertsAgainAfterWindowPasses() {
         // 回归：抑制曾在每次事件时刷新时间戳（滑动续期），持续故障只告警一次后彻底静默；
-        // 固定窗口语义下窗口过期后应再次分发
+        // 固定窗口语义下，事件持续流动跨过窗口边界时应再次分发，且不触发恢复
         CollectingNotifier notifier = new CollectingNotifier();
         AlertDispatcher dispatcher = new AlertDispatcher(List.of(notifier), 40, 1000);
 
-        // 窗口内高频重复事件：窗口不续期，只在首报时发一次（总耗时远小于窗口）
+        // 事件以 ~2ms 间隔持续流动 30 次（远超 40ms 窗口），保证无静默期
+        long alerts = 0;
+        for (int i = 0; i < 30; i++) {
+            dispatcher.onResult("api", 1500, true, true, "GET", "/x", null);
+            try {
+                Thread.sleep(2);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        alerts = notifier.events.stream().filter(e -> !e.isRecovered()).count();
+        assertTrue(alerts >= 2,
+                "事件持续流动跨过窗口边界应再次告警（实际告警: " + alerts + " 条）");
+        assertTrue(notifier.events.stream().noneMatch(GovernanceAlertEvent::isRecovered),
+                "无静默期就不应产生恢复事件");
+    }
+
+    @Test
+    void recoveryEmittedWhenQuietForFullWindow() throws Exception {
+        // 0.6.0 惰性恢复：曾抑制过事件的条目安静超过一个窗口后，
+        // 由下一次任意事件分发触发补发恢复通知（携带被抑制条数）。
+        // 注意恢复事件先于触发它的事件本身入列（扫描发生在分发开头）
+        CollectingNotifier notifier = new CollectingNotifier();
+        AlertDispatcher dispatcher = new AlertDispatcher(List.of(notifier), 40, 1000);
+
+        // 首报（1 条告警）+ 窗口内 3 条被抑制
         dispatcher.onResult("api", 1500, true, true, "GET", "/x", null);
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 3; i++) {
             dispatcher.onResult("api", 1500, true, true, "GET", "/x", null);
             Thread.sleep(2);
         }
-        assertEquals(1, notifier.events.size(), "抑制窗口内不应重复告警");
+        assertEquals(1, notifier.events.size());
+        assertTrue(notifier.events.stream().noneMatch(GovernanceAlertEvent::isRecovered));
 
-        // 窗口滑出后新事件再次告警（持续故障可被周期性重新感知）
+        // 安静超过抑制窗口后，另一 apiKey 的事件触发扫描 → 补发恢复
         Thread.sleep(50);
+        dispatcher.onResult("other-api", 1500, true, true, "GET", "/x", null);
+
+        assertEquals(3, notifier.events.size());
+        GovernanceAlertEvent recovery = notifier.events.get(1);
+        assertTrue(recovery.isRecovered());
+        assertEquals(GovernanceAlertEvent.Type.SLOW_METHOD, recovery.getType());
+        assertEquals("api", recovery.getApiKey());
+        assertEquals(3, recovery.getSuppressedCount());
+    }
+
+    @Test
+    void markRecoveredEmitsImmediatelyAndBypassesSuppression() {
+        // 0.6.0 精确恢复信号：限流器故障恢复由 FailSafeRateLimiter 显式上报，
+        // 不等待惰性扫描、不受抑制窗口约束
+        CollectingNotifier notifier = new CollectingNotifier();
+        AlertDispatcher dispatcher = new AlertDispatcher(List.of(notifier), 60_000, 1000);
+
+        dispatcher.publishRateLimiterFailure("redis", "connection refused");
+        dispatcher.markRecovered(GovernanceAlertEvent.Type.RATE_LIMITER_FAILURE, "redis");
+
+        assertEquals(2, notifier.events.size());
+        GovernanceAlertEvent recovery = notifier.events.get(1);
+        assertTrue(recovery.isRecovered());
+        assertEquals(GovernanceAlertEvent.Type.RATE_LIMITER_FAILURE, recovery.getType());
+        assertEquals(0, recovery.getSuppressedCount());
+    }
+
+    @Test
+    void markRecoveredSkipsWhenNoActiveAlert() {
+        // 没有活动告警时显式恢复信号应空转，不产生噪音事件
+        CollectingNotifier notifier = new CollectingNotifier();
+        AlertDispatcher dispatcher = new AlertDispatcher(List.of(notifier), 60_000, 1000);
+
+        dispatcher.markRecovered(GovernanceAlertEvent.Type.RATE_LIMITER_FAILURE, "redis");
+
+        assertEquals(0, notifier.events.size());
+    }
+
+    @Test
+    void recoveryCanBeDisabled() throws Exception {
+        CollectingNotifier notifier = new CollectingNotifier();
+        AlertDispatcher dispatcher = new AlertDispatcher(List.of(notifier), 40, 1000, false);
+
         dispatcher.onResult("api", 1500, true, true, "GET", "/x", null);
-        assertEquals(2, notifier.events.size(), "抑制窗口过期后应再次告警");
+        for (int i = 0; i < 3; i++) {
+            dispatcher.onResult("api", 1500, true, true, "GET", "/x", null);
+            Thread.sleep(2);
+        }
+        Thread.sleep(50);
+        dispatcher.onResult("other-api", 1500, true, true, "GET", "/x", null);
+        dispatcher.markRecovered(GovernanceAlertEvent.Type.RATE_LIMITER_FAILURE, "redis");
+
+        // recovery-enabled=false：既无惰性恢复也无显式恢复
+        assertTrue(notifier.events.stream().noneMatch(GovernanceAlertEvent::isRecovered));
     }
 }

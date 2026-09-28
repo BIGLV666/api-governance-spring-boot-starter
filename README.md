@@ -35,6 +35,10 @@
 - ✅ **治理范围可配置**（0.4.0 新增）：`include-packages` / `exclude-packages` 按包前缀批量圈定治理范围。
 - ✅ **链路追踪为可选依赖**（0.4.0 新增）：不使用 OpenTelemetry 时零追踪栈开销，治理能力完全不受影响。
 - ✅ **异步钩子可观测**（0.5.0 新增）：Handler 执行指标（次数/耗时/线程池水位）、管理端点注册清单、队列拒绝告警、启动期 action 交叉校验、内置 HTTP 上下文快照 enricher。
+- ✅ **标准限流响应头**（0.6.0 新增）：429 响应自动携带 `RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset` / `Retry-After`（对齐 IETF ratelimit-headers 草案字段名），客户端可机器可读地退避。
+- ✅ **告警恢复通知**（0.6.0 新增）：异常状况解除后（限流器故障后首次成功 / 慢方法安静超过抑制窗口）补发恢复事件，携带抑制期内被静默丢弃的告警条数。
+- ✅ **集群限流回归防线**（0.6.0 新增）：3 master Redis 集群集成测试验证 `resetAll` 多节点扇出与 Lua 限流正确性（集群未启动时自动跳过，CI 已内置集群启动步骤）。
+- ✅ **Grafana 面板**（0.6.0 新增）：内置 10 面板仪表盘 JSON（请求/拒绝/耗时分位/异步池水位），真实应用链路已验证，导入即用。
 
 ---
 
@@ -46,7 +50,7 @@
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.5.1</version>
+    <version>0.6.0</version>
 </dependency>
 ```
 
@@ -129,6 +133,7 @@ api:
     alert:
       enabled: true                   # 告警总开关
       suppress-interval-ms: 10000     # 同 (类型, apiKey) 告警最小间隔（防风暴）
+      recovery-enabled: true          # 0.6.0 新增：状况解除后补发恢复通知（携带抑制计数）
       webhook:
         enabled: false                # 内置 Webhook 通知器
         url: ""                       # webhook 地址（钉钉/企微/飞书机器人）
@@ -309,6 +314,21 @@ api:
 无论哪种策略，故障都会记录 error 日志并触发 `RATE_LIMITER_FAILURE` 告警（若已配置告警通知器）。
 `fail-close` 的拒绝以 503 状态码返回，与普通 429 限流拒绝区分，便于运维定位。
 
+### 8. 标准限流响应头（0.6.0 新增）
+
+被限流的响应（默认 429，或自定义状态码）自动携带标准限流响应头，客户端可机器可读地退避：
+
+| 响应头 | 值 | 说明 |
+|--------|-----|------|
+| `RateLimit-Limit` | 限流阈值 | 对齐 IETF ratelimit-headers 草案字段名 |
+| `RateLimit-Remaining` | 0 | 拒绝时剩余配额为 0 |
+| `RateLimit-Reset` | 窗口秒数 | 配额恢复的保守上界 |
+| `Retry-After` | 窗口秒数 | 建议退避间隔 |
+
+自定义 `RateLimitRejectHandler` 可通过 `context.addResponseHeader("Retry-After", "42")`
+用同名头覆盖默认值；自定义 `PreFilter` 写入的头同样会随拒绝响应返回。
+放行路径不携带这些头（避免 Redis 限流下每次请求多一次计数查询）。
+
 ---
 
 ## 五、过滤器管道（自定义插件）
@@ -419,6 +439,43 @@ management:
 > Meter 一旦创建即常驻 Micrometer 注册表，清理需走 Micrometer 自身机制（内存注册表的 LRU
 > 淘汰与 DELETE 指标清空不会同步删除 Meter）。
 
+### Grafana 面板（0.6.0 新增）
+
+仓库内置现成面板 [`grafana/api-governance-dashboard.json`](grafana/api-governance-dashboard.json)
+（10 个面板：治理请求总量 / 拒绝占比 / 异常占比 / API 数量、请求速率按 outcome 堆叠、
+耗时 p50/p95/p99、被限流接口 Top 10、异步执行速率与线程池水位），已在真实
+PaperWise 应用 + Prometheus + Grafana 链路上验证：
+
+![Grafana 面板](grafana/dashboard-screenshot.png)
+
+**导入方式**：Grafana → Dashboards → Import → 上传 JSON，导入时选择你的 Prometheus
+数据源（JSON 中数据源 uid 为 `prometheus-gov`，导入向导会提示替换）；顶部「应用」变量
+按 `application` 标签过滤，多应用共用一个 Prometheus 时可直接切换。
+
+**前置条件**：
+
+```xml
+<!-- 1. 引入 Prometheus 注册表（actuator 为 api-governance 的可选依赖，需显式声明） -->
+<dependency>
+    <groupId>io.micrometer</groupId>
+    <artifactId>micrometer-registry-prometheus</artifactId>
+</dependency>
+```
+
+```yaml
+# 2. 暴露抓取端点
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    distribution:
+      # 3. 分位面板（p50/p95/p99）需要 histogram 桶；不开启时该面板无数据，其余面板不受影响
+      percentiles-histogram:
+        api.governance.request.duration: true
+```
+
 ---
 
 ## 九、告警插件（0.2.0 新增）
@@ -459,6 +516,14 @@ api:
 
 统一分发器（`AlertDispatcher`）负责告警风暴抑制与异常隔离：任一通知器抛出异常只记 warn 日志，
 绝不影响业务请求。事件不含方法入参、返回值与异常堆栈，无敏感信息外泄风险。
+
+**告警恢复通知（0.6.0 新增，`api.governance.alert.recovery-enabled` 默认开）**：
+异常状况解除后自动补发恢复事件（`recovered=true`，携带抑制期内被静默丢弃的条数）：
+
+- **限流器故障**：故障后首次成功获取配额即上报恢复（精确信号，如 Redis 恢复后第一个请求）；
+- **慢方法 / 限流拒绝**：对应 (类型, apiKey) 安静超过一个抑制窗口后，由下一次告警分发
+  惰性扫描补发恢复（系统完全安静时恢复通知会延迟到下一个事件到达）；
+- 恢复事件本身不受抑制窗口约束；钉钉/企微/飞书文案以「【API治理恢复】」前缀区分。
 
 ---
 
@@ -631,6 +696,20 @@ MQ 的 `traceparent`、`tracestate`、`baggage` 由框架写入消息 Header；�
 ---
 
 ## 十三、版本升级
+
+### 从 0.5.1 升级到 0.6.0
+
+全部为增量特性，默认行为有两处需留意：
+
+1. **429 响应新增标准限流头**：被限流的响应自动携带 `RateLimit-Limit` / `RateLimit-Remaining` /
+   `RateLimit-Reset` / `Retry-After`。依赖精确响应头集合的客户端需知悉；
+   自定义 `RateLimitRejectHandler` 可用 `context.addResponseHeader` 覆盖同名头；
+2. **`spring-boot-starter-actuator` 转为可选依赖**（0.5.1 引入，此处重申）：需要 Micrometer
+   指标桥接 / Prometheus 端点的宿主请显式声明该依赖，未引入时治理核心能力不受影响。
+
+增量项：告警恢复通知（`api.governance.alert.recovery-enabled` 默认开，
+关闭即回到 0.5.1 行为）；新增 3 master Redis 集群集成测试与 CI 集群步骤，
+作为 `resetAll` 多节点扇出的回归防线（集群不可用时测试自动跳过）。
 
 ### 从 0.4.0 升级到 0.5.0
 

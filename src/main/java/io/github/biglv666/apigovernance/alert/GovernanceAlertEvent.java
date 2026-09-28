@@ -42,8 +42,20 @@ public class GovernanceAlertEvent {
     private final long thresholdMs;
     private final long timestampMs;
 
+    /** 是否为恢复通知（0.6.0 新增）：true 表示对应告警类型的异常状况已解除。 */
+    private final boolean recovered;
+
+    /** 恢复前被抑制窗口静默丢弃的告警条数（仅恢复事件携带，其余为 0）。 */
+    private final long suppressedCount;
+
     private GovernanceAlertEvent(Type type, String apiKey, String httpMethod, String path,
                                  String message, long elapsedMs, long thresholdMs, long timestampMs) {
+        this(type, apiKey, httpMethod, path, message, elapsedMs, thresholdMs, timestampMs, false, 0);
+    }
+
+    private GovernanceAlertEvent(Type type, String apiKey, String httpMethod, String path,
+                                 String message, long elapsedMs, long thresholdMs, long timestampMs,
+                                 boolean recovered, long suppressedCount) {
         this.type = type;
         this.apiKey = apiKey;
         this.httpMethod = httpMethod;
@@ -52,6 +64,8 @@ public class GovernanceAlertEvent {
         this.elapsedMs = elapsedMs;
         this.thresholdMs = thresholdMs;
         this.timestampMs = timestampMs;
+        this.recovered = recovered;
+        this.suppressedCount = suppressedCount;
     }
 
     /**
@@ -151,9 +165,39 @@ public class GovernanceAlertEvent {
         return timestampMs;
     }
 
+    /**
+     * 是否为恢复通知（0.6.0 新增）：true 表示对应告警类型的异常状况已解除，
+     * {@code type} 仍为原告警类型，通知器可据此区分「故障」与「恢复」。
+     */
+    public boolean isRecovered() {
+        return recovered;
+    }
+
+    /**
+     * 恢复前被抑制窗口静默丢弃的告警条数；仅恢复事件携带，其余为 0。
+     */
+    public long getSuppressedCount() {
+        return suppressedCount;
+    }
+
+    /**
+     * 创建恢复通知事件（0.6.0 新增）。
+     *
+     * @param originalType    恢复的告警类型
+     * @param apiKey          告警主体（API 标识或限流器名称）
+     * @param suppressedCount 抑制期内被静默丢弃的告警条数
+     * @return 恢复事件（{@code recovered == true}）
+     */
+    public static GovernanceAlertEvent recovery(Type originalType, String apiKey, long suppressedCount) {
+        return new GovernanceAlertEvent(originalType, apiKey, null, null,
+                "告警恢复: " + originalType + " 已解除（抑制期内静默丢弃 " + suppressedCount + " 条告警）",
+                -1, -1, System.currentTimeMillis(), true, suppressedCount);
+    }
+
     @Override
     public String toString() {
-        return "[" + type + "] " + Instant.ofEpochMilli(timestampMs) + " api=" + apiKey
+        String prefix = recovered ? "[RECOVERED:" + type + "] " : "[" + type + "] ";
+        return prefix + Instant.ofEpochMilli(timestampMs) + " api=" + apiKey
                 + " " + httpMethod + " " + path + " - " + message;
     }
 }

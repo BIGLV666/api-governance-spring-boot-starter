@@ -41,6 +41,7 @@ class FailSafeRateLimiterTest {
      */
     static class CapturingDispatcher extends AlertDispatcher {
         final List<String> failures = new java.util.ArrayList<>();
+        final List<String> recoveries = new java.util.ArrayList<>();
 
         CapturingDispatcher() {
             super(List.of(), 0, 1000);
@@ -49,6 +50,12 @@ class FailSafeRateLimiterTest {
         @Override
         public void publishRateLimiterFailure(String rateLimiterName, String error) {
             failures.add(rateLimiterName + ":" + error);
+        }
+
+        @Override
+        public void markRecovered(io.github.biglv666.apigovernance.alert.GovernanceAlertEvent.Type type,
+                                  String apiKey) {
+            recoveries.add(type + ":" + apiKey);
         }
     }
 
@@ -103,5 +110,65 @@ class FailSafeRateLimiterTest {
 
         // 委托正常拒绝（返回 false）不等同于故障，不应触发降级逻辑
         assertFalse(limiter.tryAcquire("k", 10, 1));
+    }
+
+    @Test
+    void firstSuccessAfterFailureSignalsRecovery() {
+        // 0.6.0 恢复通知：故障后首次成功上报 RATE_LIMITER_FAILURE 恢复，且只报一次
+        RateLimiter flaky = new RateLimiter() {
+            int attempts;
+
+            @Override
+            public boolean tryAcquire(String key, int limit, int windowSeconds) {
+                if (attempts++ == 0) {
+                    throw new IllegalStateException("connection refused");
+                }
+                return true;
+            }
+
+            @Override
+            public String getName() {
+                return "flaky-redis";
+            }
+        };
+        CapturingDispatcher dispatcher = new CapturingDispatcher();
+        FailSafeRateLimiter limiter = new FailSafeRateLimiter(flaky, false, dispatcher);
+
+        // 第 1 次：故障（fail-open 放行）
+        assertTrue(limiter.tryAcquire("k", 10, 1));
+        assertEquals(1, dispatcher.failures.size());
+        assertEquals(0, dispatcher.recoveries.size());
+
+        // 第 2 次：成功 → 恢复信号
+        assertTrue(limiter.tryAcquire("k", 10, 1));
+        assertEquals(1, dispatcher.recoveries.size());
+        assertEquals("RATE_LIMITER_FAILURE:flaky-redis", dispatcher.recoveries.get(0));
+
+        // 第 3 次：继续成功 → 不重复上报
+        assertTrue(limiter.tryAcquire("k", 10, 1));
+        assertEquals(1, dispatcher.recoveries.size());
+    }
+
+    @Test
+    void healthyLimiterNeverSignalsRecovery() {
+        RateLimiter healthy = new RateLimiter() {
+            @Override
+            public boolean tryAcquire(String key, int limit, int windowSeconds) {
+                return true;
+            }
+
+            @Override
+            public String getName() {
+                return "healthy-redis";
+            }
+        };
+        CapturingDispatcher dispatcher = new CapturingDispatcher();
+        FailSafeRateLimiter limiter = new FailSafeRateLimiter(healthy, false, dispatcher);
+
+        assertTrue(limiter.tryAcquire("k", 10, 1));
+        assertTrue(limiter.tryAcquire("k", 10, 1));
+
+        assertEquals(0, dispatcher.failures.size());
+        assertEquals(0, dispatcher.recoveries.size());
     }
 }

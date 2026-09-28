@@ -163,10 +163,12 @@ public class GovernanceAspect {
             // 6. 前置过滤器链：任一 false 即短路
             if (!filterChain.executePreFilters(context)) {
                 rejected = true;
+                // 上下文中收集的响应头（如 RateLimit-* / Retry-After）随异常带给处理器写回响应
                 throw new GovernanceException(
                         context.getRejectStatus(),
                         "REJECTED",
-                        context.getRejectReason() != null ? context.getRejectReason() : "请求被拒绝");
+                        context.getRejectReason() != null ? context.getRejectReason() : "请求被拒绝",
+                        context.getResponseHeaders());
             }
             // 7. 执行业务逻辑（只调用一次）
             return result = joinPoint.proceed();

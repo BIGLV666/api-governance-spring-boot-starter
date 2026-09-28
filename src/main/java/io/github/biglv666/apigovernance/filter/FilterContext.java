@@ -4,6 +4,7 @@ import org.aspectj.lang.ProceedingJoinPoint;
 
 import java.lang.reflect.Method;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -83,6 +84,13 @@ public class FilterContext {
 
     /** 拒绝原因。 */
     private String rejectReason;
+
+    /**
+     * 随拒绝响应返回的 HTTP 响应头（有序）。前置过滤器可写入自定义头
+     * （如 {@code Retry-After}），由切面携带到 {@code GovernanceException}，
+     * 最终经 {@code GovernanceExceptionHandler} 写入响应。
+     */
+    private final Map<String, String> responseHeaders = new LinkedHashMap<>();
 
     /** 业务方法返回值（成功时）。 */
     private Object result;
@@ -234,6 +242,36 @@ public class FilterContext {
 
     public void setRejectReason(String rejectReason) {
         this.rejectReason = rejectReason;
+    }
+
+    // ==================== 拒绝响应头 ====================
+
+    /**
+     * 写入一条随拒绝响应返回的 HTTP 响应头（同名覆盖）。
+     *
+     * @param name  响应头名称
+     * @param value 响应头值
+     */
+    public void addResponseHeader(String name, String value) {
+        if (name != null && !name.isBlank() && value != null) {
+            responseHeaders.put(name, value);
+        }
+    }
+
+    /**
+     * 获取已写入的响应头快照（不可变，保持写入顺序）。
+     *
+     * @return 响应头映射，无写入时为空映射
+     */
+    public Map<String, String> getResponseHeaders() {
+        return Map.copyOf(responseHeaders);
+    }
+
+    /**
+     * 指定响应头是否已写入。
+     */
+    public boolean hasResponseHeader(String name) {
+        return name != null && responseHeaders.containsKey(name);
     }
 
     // ==================== 结果与异常 ====================

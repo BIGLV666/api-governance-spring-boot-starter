@@ -1,5 +1,7 @@
 package io.github.biglv666.apigovernance.exception;
 
+import java.util.Map;
+
 /**
  * 治理拒绝异常。
  *
@@ -29,6 +31,12 @@ public class GovernanceException extends RuntimeException {
     private final String code;
 
     /**
+     * 随响应返回的 HTTP 响应头（如 {@code Retry-After} / {@code RateLimit-*} 标准限流头）。
+     * 由切面从 {@code FilterContext} 收集，异常处理器负责写入实际响应。
+     */
+    private final Map<String, String> headers;
+
+    /**
      * 构造治理拒绝异常。
      *
      * @param status  HTTP 状态码
@@ -36,9 +44,22 @@ public class GovernanceException extends RuntimeException {
      * @param message 拒绝原因（对用户友好）
      */
     public GovernanceException(int status, String code, String message) {
+        this(status, code, message, Map.of());
+    }
+
+    /**
+     * 构造治理拒绝异常（携带响应头）。
+     *
+     * @param status  HTTP 状态码
+     * @param code    业务错误码
+     * @param message 拒绝原因（对用户友好）
+     * @param headers 随响应返回的 HTTP 响应头（null 按空处理）
+     */
+    public GovernanceException(int status, String code, String message, Map<String, String> headers) {
         super(message);
         this.status = status;
         this.code = code;
+        this.headers = headers == null ? Map.of() : Map.copyOf(headers);
     }
 
     /**
@@ -57,5 +78,14 @@ public class GovernanceException extends RuntimeException {
 
     public String getCode() {
         return code;
+    }
+
+    /**
+     * 获取随响应返回的 HTTP 响应头快照。
+     *
+     * @return 不可变映射，无附加头时为空映射
+     */
+    public Map<String, String> getHeaders() {
+        return headers;
     }
 }

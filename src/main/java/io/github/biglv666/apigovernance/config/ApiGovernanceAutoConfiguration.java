@@ -199,10 +199,11 @@ public class ApiGovernanceAutoConfiguration {
     public AlertDispatcher alertDispatcher(ApiGovernanceProperties properties,
                                            ObjectProvider<GovernanceAlertNotifier> notifiers) {
         List<GovernanceAlertNotifier> notifierList = notifiers.orderedStream().toList();
-        log.info("配置告警分发器 - 通知器数量: {}, 抑制窗口: {}ms",
-                notifierList.size(), properties.getAlert().getSuppressIntervalMs());
+        log.info("配置告警分发器 - 通知器数量: {}, 抑制窗口: {}ms, 恢复通知: {}",
+                notifierList.size(), properties.getAlert().getSuppressIntervalMs(),
+                properties.getAlert().isRecoveryEnabled() ? "开" : "关");
         return new AlertDispatcher(notifierList, properties.getAlert().getSuppressIntervalMs(),
-                properties.getLog().getSlowThresholdMs());
+                properties.getLog().getSlowThresholdMs(), properties.getAlert().isRecoveryEnabled());
     }
 
     // ==================== 限流器插件 ====================

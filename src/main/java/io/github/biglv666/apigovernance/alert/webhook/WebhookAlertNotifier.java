@@ -194,7 +194,9 @@ public class WebhookAlertNotifier implements GovernanceAlertNotifier {
      */
     private String toPlainText(GovernanceAlertEvent event) {
         StringBuilder sb = new StringBuilder(128);
-        sb.append("【API治理告警】").append(event.getType().name()).append('\n');
+        // 恢复事件（0.6.0）与故障事件用不同前缀区分，正文 message 自带恢复详情
+        sb.append(event.isRecovered() ? "【API治理恢复】" : "【API治理告警】")
+                .append(event.getType().name()).append('\n');
         sb.append(event.getMessage());
         if (event.getApiKey() != null) {
             sb.append("\nAPI: ").append(event.getApiKey());

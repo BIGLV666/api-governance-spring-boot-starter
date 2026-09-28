@@ -17,6 +17,23 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
           cache: maven
+      - name: Start Redis cluster (3 masters, for RedisClusterRateLimiterIntegrationTest)
+        run: |
+          docker run -d --name governance-redis-cluster \
+            -p 7000:7000 -p 7001:7001 -p 7002:7002 \
+            -p 17000:17000 -p 17001:17001 -p 17002:17002 \
+            redis:7-alpine sh -c 'for i in 0 1 2; do mkdir -p /data/n$i; done;
+              redis-server --port 7000 --cluster-enabled yes --cluster-config-file /data/n0/nodes.conf --cluster-node-timeout 5000 --cluster-announce-ip 127.0.0.1 --appendonly no --save "" --dir /data/n0 --daemonize yes;
+              redis-server --port 7001 --cluster-enabled yes --cluster-config-file /data/n1/nodes.conf --cluster-node-timeout 5000 --cluster-announce-ip 127.0.0.1 --appendonly no --save "" --dir /data/n1 --daemonize yes;
+              redis-server --port 7002 --cluster-enabled yes --cluster-config-file /data/n2/nodes.conf --cluster-node-timeout 5000 --cluster-announce-ip 127.0.0.1 --appendonly no --save "" --dir /data/n2 --daemonize yes;
+              sleep infinity'
+          for i in $(seq 1 30); do
+            if docker exec governance-redis-cluster redis-cli --cluster create 127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 --cluster-yes; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec governance-redis-cluster redis-cli --cluster check 127.0.0.1:7000
       - name: Build & Test
         run: mvn -B test --file pom.xml
       - name: Install to local repo (verify packaging)

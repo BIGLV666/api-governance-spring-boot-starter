@@ -524,6 +524,7 @@ public class GovernanceManagementController {
         ApiGovernanceProperties.Alert dstAlert = masked.getAlert();
         dstAlert.setEnabled(srcAlert.isEnabled());
         dstAlert.setSuppressIntervalMs(srcAlert.getSuppressIntervalMs());
+        dstAlert.setRecoveryEnabled(srcAlert.isRecoveryEnabled());
         ApiGovernanceProperties.Webhook srcWebhook = srcAlert.getWebhook();
         ApiGovernanceProperties.Webhook dstWebhook = dstAlert.getWebhook();
         dstWebhook.setEnabled(srcWebhook.isEnabled());

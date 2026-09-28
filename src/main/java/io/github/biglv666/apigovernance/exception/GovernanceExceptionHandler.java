@@ -39,13 +39,19 @@ public class GovernanceExceptionHandler {
     /**
      * 处理治理拒绝异常。
      *
+     * <p>异常携带的响应头（如限流标准头 {@code RateLimit-*} / {@code Retry-After}）
+     * 会原样写入响应；宿主若自定义 {@code GovernanceExceptionHandler} Bean 覆盖本类，
+     * 需自行处理 {@link GovernanceException#getHeaders()}。
+     *
      * @param ex 治理拒绝异常
-     * @return 携带统一 JSON 结构的响应实体
+     * @return 携带统一 JSON 结构与治理响应头的响应实体
      */
     @ExceptionHandler(GovernanceException.class)
     public ResponseEntity<Map<String, Object>> handleGovernanceException(GovernanceException ex) {
         Map<String, Object> body = buildBody(ex.getCode(), ex.getMessage(), ex.getStatus());
-        return ResponseEntity.status(ex.getStatus()).body(body);
+        return ResponseEntity.status(ex.getStatus())
+                .headers(h -> ex.getHeaders().forEach(h::set))
+                .body(body);
     }
 
     /**

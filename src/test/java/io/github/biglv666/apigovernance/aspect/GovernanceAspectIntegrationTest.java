@@ -10,6 +10,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -38,10 +39,15 @@ class GovernanceAspectIntegrationTest {
                     .andExpect(status().isOk())
                     .andExpect(content().string("ok"));
         }
-        // 第 3 次超限：前置链短路，返回 yml 默认状态码 429 与提示语
+        // 第 3 次超限：前置链短路，返回 yml 默认状态码 429 与提示语，
+        // 并携带标准限流响应头（0.6.0：客户端可机器可读地退避）
         mockMvc.perform(get("/gov-test/limited"))
                 .andExpect(status().isTooManyRequests())
-                .andExpect(jsonPath("$.message").exists());
+                .andExpect(jsonPath("$.message").exists())
+                .andExpect(header().string("RateLimit-Limit", "2"))
+                .andExpect(header().string("RateLimit-Remaining", "0"))
+                .andExpect(header().string("RateLimit-Reset", "60"))
+                .andExpect(header().string("Retry-After", "60"));
     }
 
     @Test

@@ -1,8 +1,11 @@
 package io.github.biglv666.apigovernance.ratelimit;
 
+import io.github.biglv666.apigovernance.alert.GovernanceAlertEvent;
 import io.github.biglv666.apigovernance.alert.internal.AlertDispatcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 限流器故障降级装饰器 —— 统一处理限流器（主要是 Redis 分布式限流）执行异常。
@@ -17,8 +20,9 @@ import org.slf4j.LoggerFactory;
  * </ul>
  *
  * <p>无论哪种策略，故障都会产生 {@code RATE_LIMITER_FAILURE} 告警事件（若已配置告警通知器）
- * 并记录 error 日志。策略仅对 {@link #tryAcquire} 生效；管理接口的查询/重置操作
- * 异常由管理控制器自行捕获展示。
+ * 并记录 error 日志；故障后首次成功会触发该类型的<b>恢复通知</b>（0.6.0 新增，
+ * {@code api.governance.alert.recovery-enabled} 控制）。策略仅对 {@link #tryAcquire} 生效；
+ * 管理接口的查询/重置操作异常由管理控制器自行捕获展示。
  *
  * <p>自动配置中 Redis 限流器 Bean 均由本类包装后暴露；用户自定义
  * {@code RateLimiter} Bean 不做包装（用户对自己实现的异常语义负责）。
@@ -40,6 +44,12 @@ public class FailSafeRateLimiter implements RateLimiter {
     private final AlertDispatcher alertDispatcher;
 
     /**
+     * 自上次成功以来是否发生过故障：用于在故障后首次成功时上报
+     * {@code RATE_LIMITER_FAILURE} 的恢复信号（0.6.0 新增）。
+     */
+    private final AtomicBoolean failedSinceLastSuccess = new AtomicBoolean(false);
+
+    /**
      * 构造故障降级装饰器。
      *
      * @param delegate        被包装的真实限流器
@@ -55,8 +65,15 @@ public class FailSafeRateLimiter implements RateLimiter {
     @Override
     public boolean tryAcquire(String key, int limit, int windowSeconds) {
         try {
-            return delegate.tryAcquire(key, limit, windowSeconds);
+            boolean pass = delegate.tryAcquire(key, limit, windowSeconds);
+            // 故障后首次成功：上报恢复信号（内部有「无活动告警则跳过」的去重语义）
+            if (failedSinceLastSuccess.compareAndSet(true, false) && alertDispatcher != null) {
+                alertDispatcher.markRecovered(GovernanceAlertEvent.Type.RATE_LIMITER_FAILURE,
+                        delegate.getName());
+            }
+            return pass;
         } catch (Exception e) {
+            failedSinceLastSuccess.set(true);
             log.error("限流器执行故障 - limiter: {}, key: {}, 策略: {}, 错误: {}",
                     delegate.getName(), key, failClose ? "close(拒绝)" : "open(放行)", e.getMessage(), e);
             if (alertDispatcher != null) {

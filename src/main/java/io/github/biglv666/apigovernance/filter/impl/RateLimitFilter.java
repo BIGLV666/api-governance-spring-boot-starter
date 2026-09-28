@@ -83,9 +83,38 @@ public class RateLimitFilter implements PreFilter {
         }
 
         if (!pass) {
+            addStandardRateLimitHeaders(context);
             rejectWithHandler(context, rateLimitKey);
         }
         return pass;
+    }
+
+    /**
+     * 写入 IETF ratelimit-headers 草案字段名对应的标准响应头：
+     * {@code RateLimit-Limit}（阈值）、{@code RateLimit-Remaining}（剩余配额，
+     * 拒绝时为 0）、{@code RateLimit-Reset} / {@code Retry-After}（窗口秒数）。
+     *
+     * <p>仅在被限流的请求上返回——放行路径若也要携带需要每次调用
+     * {@code getCurrentCount}，Redis 限流下会多一次往返，收益不抵成本。
+     * Reset/Retry-After 取窗口长度（保守上界，非精确到毫秒的窗口终点）。
+     *
+     * <p>先于自定义 {@link RateLimitRejectHandler} 执行且仅在缺省时写入：
+     * 处理器可通过 {@code context.addResponseHeader} 用同名头覆盖默认值。
+     */
+    private void addStandardRateLimitHeaders(FilterContext context) {
+        if (!context.hasResponseHeader("RateLimit-Limit")) {
+            context.addResponseHeader("RateLimit-Limit", String.valueOf(context.getRateLimit()));
+        }
+        if (!context.hasResponseHeader("RateLimit-Remaining")) {
+            context.addResponseHeader("RateLimit-Remaining", "0");
+        }
+        String windowSeconds = String.valueOf(context.getWindow());
+        if (!context.hasResponseHeader("RateLimit-Reset")) {
+            context.addResponseHeader("RateLimit-Reset", windowSeconds);
+        }
+        if (!context.hasResponseHeader("Retry-After")) {
+            context.addResponseHeader("Retry-After", windowSeconds);
+        }
     }
 
     /**

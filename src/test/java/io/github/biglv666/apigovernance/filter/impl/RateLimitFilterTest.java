@@ -98,6 +98,72 @@ class RateLimitFilterTest {
     }
 
     @Test
+    void rejectCarriesStandardRateLimitHeaders() {
+        // 0.6.0：被限流的响应携带 IETF ratelimit-headers 草案字段名的标准头，
+        // 客户端可机器可读地退避（Retry-After / RateLimit-Limit|Remaining|Reset）
+        RateLimiter rateLimiter = new RateLimiter() {
+            @Override
+            public boolean tryAcquire(String key, int limit, int windowSeconds) {
+                return false;
+            }
+
+            @Override
+            public String getName() {
+                return "test";
+            }
+        };
+        MetricsRegistry registry = new MetricsRegistry(10, 10, 0);
+        ApiGovernanceProperties properties = new ApiGovernanceProperties();
+
+        RateLimitFilter filter = new RateLimitFilter(rateLimiter, registry, properties,
+                FilterContext::getApiKey, null);
+
+        FilterContext context = realContext("api");
+        context.setRateLimitEnabled(true);
+        context.setRateLimit(100);
+        context.setWindow(60);
+
+        assertFalse(filter.doFilter(context));
+        assertEquals("100", context.getResponseHeaders().get("RateLimit-Limit"));
+        assertEquals("0", context.getResponseHeaders().get("RateLimit-Remaining"));
+        assertEquals("60", context.getResponseHeaders().get("RateLimit-Reset"));
+        assertEquals("60", context.getResponseHeaders().get("Retry-After"));
+    }
+
+    @Test
+    void customRejectHandlerCanOverrideStandardHeaders() {
+        RateLimiter rateLimiter = new RateLimiter() {
+            @Override
+            public boolean tryAcquire(String key, int limit, int windowSeconds) {
+                return false;
+            }
+
+            @Override
+            public String getName() {
+                return "test";
+            }
+        };
+        MetricsRegistry registry = new MetricsRegistry(10, 10, 0);
+        ApiGovernanceProperties properties = new ApiGovernanceProperties();
+        // 处理器写入的同名头覆盖默认值（如精确计算的重试间隔）
+        RateLimitRejectHandler handler = (ctx, key) ->
+                ctx.addResponseHeader("Retry-After", "42");
+
+        RateLimitFilter filter = new RateLimitFilter(rateLimiter, registry, properties,
+                FilterContext::getApiKey, handler);
+
+        FilterContext context = realContext("api");
+        context.setRateLimitEnabled(true);
+        context.setRateLimit(100);
+        context.setWindow(60);
+
+        assertFalse(filter.doFilter(context));
+        assertEquals("42", context.getResponseHeaders().get("Retry-After"));
+        // 未被覆盖的标准头保持默认值
+        assertEquals("100", context.getResponseHeaders().get("RateLimit-Limit"));
+    }
+
+    @Test
     void customRejectHandlerCanCustomizeResponse() {
         RateLimiter rateLimiter = new RateLimiter() {
             @Override

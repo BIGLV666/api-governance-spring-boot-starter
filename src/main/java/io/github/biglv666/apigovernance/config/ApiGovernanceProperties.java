@@ -481,6 +481,12 @@ public class ApiGovernanceProperties {
          */
         private long suppressIntervalMs = 10000L;
 
+        /**
+         * 告警恢复通知（0.6.0 新增）：异常状况解除后（如限流器故障后首次成功、
+         * 慢方法安静超过一个抑制窗口）补发携带抑制计数的恢复事件。
+         */
+        private boolean recoveryEnabled = true;
+
         /** 内置 Webhook 通知器配置。 */
         private Webhook webhook = new Webhook();
 
@@ -498,6 +504,14 @@ public class ApiGovernanceProperties {
 
         public void setSuppressIntervalMs(long suppressIntervalMs) {
             this.suppressIntervalMs = suppressIntervalMs;
+        }
+
+        public boolean isRecoveryEnabled() {
+            return recoveryEnabled;
+        }
+
+        public void setRecoveryEnabled(boolean recoveryEnabled) {
+            this.recoveryEnabled = recoveryEnabled;
         }
 
         public Webhook getWebhook() {
