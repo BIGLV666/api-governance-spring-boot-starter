@@ -30,9 +30,15 @@ class LoggingFilterTest {
 
     private Logger logger;
 
+    private Level originalLevel;
+
     @BeforeEach
     void attachAppender() {
         logger = (Logger) LoggerFactory.getLogger(LoggingFilter.class);
+        // 显式保证级别：surefire 同 JVM 顺序执行测试类，其他测试（如 Spring 上下文）
+        // 若改写过该 logger 级别（logback 单例跨测试类残留），appender 将收不到事件
+        originalLevel = logger.getLevel();
+        logger.setLevel(Level.DEBUG);
         appender = new ListAppender<>();
         appender.start();
         logger.addAppender(appender);
@@ -41,6 +47,7 @@ class LoggingFilterTest {
     @AfterEach
     void detachAppender() {
         logger.detachAppender(appender);
+        logger.setLevel(originalLevel);
     }
 
     @Test

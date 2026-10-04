@@ -44,8 +44,10 @@ import static org.assertj.core.api.Assertions.assertThat;
         properties = {
                 // 治理保持默认：local 令牌桶 + default-limit=-1（拦截但不限流）
                 "api.governance.log.slow-threshold-ms=60000",
-                // 压测关注治理机制本身的开销，关闭访问日志的 I/O 干扰
-                "logging.level.io.github.biglv666.apigovernance=OFF"
+                // 压测关注治理机制本身的开销，关闭日志过滤器消除控制台 I/O 干扰。
+                // 注意不能用 logging.level=OFF：Spring 上下文启动会改写共享 logback
+                // 单例的 logger 级别，污染同 JVM 后续测试（曾致 LoggingFilterTest 挂）
+                "api.governance.filters.logging=false"
         })
 class HotPathHttpStressTest {
 
