@@ -4,6 +4,26 @@
 
 ## 版本升级
 
+### 从 0.6.0 升级到 0.7.0
+
+全部为增量特性，默认行为需留意三点：
+
+1. **Spring Boot 基线从 3.2.0 升至 3.5.16**：本 starter 自身测试全部通过；
+   宿主应用从 Boot 3.2 升级时请同步核对 Boot 自身的迁移说明（3.3/3.4/3.5 各版本的
+   deprecation 与行为变化），建议宿主直接跟随升级到 3.5.x。本 starter 声明的
+   支持区间为 Boot 3.3 – 3.5（CI 矩阵覆盖 3.3.13 / 3.4.13 / 3.5.16 × JDK 17/21）；
+2. **动态限流规则默认开启**（`api.governance.rate-limit.dynamic-rules.enabled: true`）：
+   未通过管理接口提交过规则时行为与 0.6.0 完全一致（零规则零开销）；不希望暴露
+   规则端点时可显式关闭；
+3. **Redis 模式下新增两个后台连接**：`dynamic-rules` 开启时（Redis 限流模式）会启动
+   一个 daemon 轮询线程（每 `refresh-interval-ms` 一次版本号 GET）—— 关闭
+   `dynamic-rules` 即可回到 0.6.0 连接行为。
+
+增量项：管理接口新增 `GET/PUT/DELETE /rate-limiter/rules` 三个端点（受既有
+`auth-token` 鉴权与 `mutations-enabled` 写开关约束）；新增 `alert.cluster-dedup-enabled`
+配置（默认关，开启需类路径存在 Spring Data Redis）；`GovernanceManagementController`
+与 `AlertDispatcher` 新增构造重载，旧签名已标注 `@Deprecated` 但仍可用。
+
 ### 从 0.5.1 升级到 0.6.0
 
 全部为增量特性，默认行为有两处需留意：

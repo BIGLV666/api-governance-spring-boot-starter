@@ -39,6 +39,9 @@
 - ✅ **告警恢复通知**（0.6.0 新增）：异常状况解除后（限流器故障后首次成功 / 慢方法安静超过抑制窗口）补发恢复事件，携带抑制期内被静默丢弃的告警条数。
 - ✅ **集群限流回归防线**（0.6.0 新增）：3 master Redis 集群集成测试验证 `resetAll` 多节点扇出与 Lua 限流正确性（集群未启动时自动跳过，CI 已内置集群启动步骤）。
 - ✅ **Grafana 面板**（0.6.0 新增）：内置 10 面板仪表盘 JSON（请求/拒绝/耗时分位/异步池水位），真实应用链路已验证，导入即用。
+- ✅ **动态限流规则**（0.7.0 新增）：管理接口运行期提交限流规则（支持尾部 `*` 通配），**无需重启即可调整/放开/封禁**；local 模式单节点生效，Redis 模式全集群秒级一致，存储故障 fail-stale 不影响业务。
+- ✅ **集群告警去重**（0.7.0 新增）：多实例部署时同一告警每抑制窗口全集群只发一条（含恢复通知），Redis `SET NX` 抢占，故障 fail-open 回退单机行为。
+- ✅ **Boot 3.3–3.5 兼容矩阵**（0.7.0 新增）：基线 Spring Boot 3.5，CI 覆盖 3.3/3.4/3.5 × JDK 17/21 全量回归。
 
 ---
 
@@ -50,7 +53,7 @@
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.6.0</version>
+    <version>0.7.0</version>
 </dependency>
 ```
 
@@ -102,7 +105,7 @@ public class UserController {
 | 文档 | 内容 |
 |------|------|
 | [配置参考](docs/configuration.md) | `api.governance.*` 全部配置项与默认值 |
-| [限流](docs/rate-limiting.md) | 本机 / Redis 限流、算法、SpEL 参数维度、标准响应头、故障降级 |
+| [限流](docs/rate-limiting.md) | 本机 / Redis 限流、算法、SpEL 参数维度、标准响应头、故障降级、动态规则热更新 |
 | [过滤器管道](docs/filters.md) | 自定义 `PreFilter` / `PostFilter` 插件与内置过滤器 |
 | [异步方法插件](docs/async.md) | `@AsyncAction` / `@AsyncHandler` 与异步可观测性（[完整契约](docs/ASYNC_ACTIONS.md)） |
 | [可观测性](docs/observability.md) | 内存指标、Micrometer 桥接、Grafana 面板、告警与恢复通知 |

@@ -274,6 +274,11 @@ public class ApiGovernanceProperties {
         private int maxEntries = 10_000;
 
         /**
+         * 动态限流规则配置（0.7.0 新增）：运行期经管理接口提交的规则热更新限流参数。
+         */
+        private DynamicRules dynamicRules = new DynamicRules();
+
+        /**
          * 获取限流器故障降级策略（归一化为小写，非法值回退 open）。
          *
          * @return "open" 或 "close"
@@ -292,6 +297,14 @@ public class ApiGovernanceProperties {
 
         public void setMaxEntries(int maxEntries) {
             this.maxEntries = maxEntries;
+        }
+
+        public DynamicRules getDynamicRules() {
+            return dynamicRules;
+        }
+
+        public void setDynamicRules(DynamicRules dynamicRules) {
+            this.dynamicRules = dynamicRules == null ? new DynamicRules() : dynamicRules;
         }
 
         public String getType() {
@@ -340,6 +353,49 @@ public class ApiGovernanceProperties {
 
         public void setMessage(String message) {
             this.message = message;
+        }
+
+        /**
+         * 动态限流规则配置（0.7.0 新增）。
+         *
+         * <p>规则经管理接口（{@code PUT /api-governance/rate-limiter/rules}）运行期提交，
+         * 优先级高于注解与全局默认；内存存储随 {@code rate-limit.type} 联动
+         * （local=本节点生效 / redis=全集群一致）。
+         */
+        public static class DynamicRules {
+
+            /** 动态规则总开关：关闭后不装配规则存储，切面行为与 0.6.0 完全一致。 */
+            private boolean enabled = true;
+
+            /** Redis 模式版本号轮询间隔（毫秒），即集群内规则传播延迟上界。 */
+            private long refreshIntervalMs = 5000L;
+
+            /** 规则数上限（精确 + 前缀），防止误操作灌爆存储。 */
+            private int maxRules = 1000;
+
+            public boolean isEnabled() {
+                return enabled;
+            }
+
+            public void setEnabled(boolean enabled) {
+                this.enabled = enabled;
+            }
+
+            public long getRefreshIntervalMs() {
+                return refreshIntervalMs;
+            }
+
+            public void setRefreshIntervalMs(long refreshIntervalMs) {
+                this.refreshIntervalMs = refreshIntervalMs;
+            }
+
+            public int getMaxRules() {
+                return maxRules;
+            }
+
+            public void setMaxRules(int maxRules) {
+                this.maxRules = maxRules;
+            }
         }
     }
 
@@ -487,6 +543,14 @@ public class ApiGovernanceProperties {
          */
         private boolean recoveryEnabled = true;
 
+        /**
+         * 集群告警去重（0.7.0 新增，默认关闭）：多实例部署时同一 {@code (告警类型, apiKey)}
+         * 在抑制窗口内全集群只分发一条告警（含恢复通知），避免 N 个实例发出 N 条相同通知。
+         * 依赖 Redis（{@code SET NX EX} 抢占），要求类路径存在 Spring Data Redis；
+         * 闸门故障时自动回退单机行为（fail-open），不影响业务请求。
+         */
+        private boolean clusterDedupEnabled = false;
+
         /** 内置 Webhook 通知器配置。 */
         private Webhook webhook = new Webhook();
 
@@ -512,6 +576,14 @@ public class ApiGovernanceProperties {
 
         public void setRecoveryEnabled(boolean recoveryEnabled) {
             this.recoveryEnabled = recoveryEnabled;
+        }
+
+        public boolean isClusterDedupEnabled() {
+            return clusterDedupEnabled;
+        }
+
+        public void setClusterDedupEnabled(boolean clusterDedupEnabled) {
+            this.clusterDedupEnabled = clusterDedupEnabled;
         }
 
         public Webhook getWebhook() {

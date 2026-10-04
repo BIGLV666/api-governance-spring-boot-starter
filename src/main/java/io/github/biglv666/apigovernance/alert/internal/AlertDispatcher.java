@@ -2,6 +2,7 @@ package io.github.biglv666.apigovernance.alert.internal;
 
 import io.github.biglv666.apigovernance.alert.GovernanceAlertEvent;
 import io.github.biglv666.apigovernance.alert.GovernanceAlertNotifier;
+import io.github.biglv666.apigovernance.alert.dedup.AlertDeduplicationGate;
 import io.github.biglv666.apigovernance.metrics.MetricsEventListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,6 +62,18 @@ public class AlertDispatcher implements MetricsEventListener {
     /** 是否启用恢复通知（0.6.0 新增，{@code api.governance.alert.recovery-enabled}）。 */
     private final boolean recoveryEnabled;
 
+    /**
+     * 集群去重闸门（0.7.0 新增，可为 null：未开启集群去重）。非 null 时本机抑制
+     * 通过后再抢占集群分发权，窗口内全集群只发一条；故障由闸门实现 fail-open。
+     */
+    private final AlertDeduplicationGate clusterDedupGate;
+
+    /** 集群去重默认窗口（毫秒）：本机抑制关闭（suppressIntervalMs=0）时的兜底 TTL。 */
+    private static final long DEFAULT_DEDUP_TTL_MS = 10_000L;
+
+    /** 恢复通知的集群去重窗口（毫秒）：恢复低频且必须尽快送达，用短窗口。 */
+    private static final long RECOVERY_DEDUP_TTL_MS = 30_000L;
+
     /** 抑制状态：key = type|apiKey，value = 分发时间与抑制计数的可变条目。 */
     private final Map<String, SuppressionState> lastDispatchTime = new ConcurrentHashMap<>();
 
@@ -104,10 +117,26 @@ public class AlertDispatcher implements MetricsEventListener {
      */
     public AlertDispatcher(List<GovernanceAlertNotifier> notifiers, long suppressIntervalMs,
                            long slowThresholdMs, boolean recoveryEnabled) {
+        this(notifiers, suppressIntervalMs, slowThresholdMs, recoveryEnabled, null);
+    }
+
+    /**
+     * 构造告警分发器（0.7.0 新增，支持集群去重）。
+     *
+     * @param notifiers          通知器列表（可为空列表，此时分发器空转）
+     * @param suppressIntervalMs 告警抑制窗口（毫秒），0 表示不抑制
+     * @param slowThresholdMs    慢方法阈值（毫秒），随慢方法告警事件携带
+     * @param recoveryEnabled    是否启用恢复通知（0.6.0 新增）
+     * @param clusterDedupGate   集群去重闸门（0.7.0 新增，null 表示不开启集群去重）
+     */
+    public AlertDispatcher(List<GovernanceAlertNotifier> notifiers, long suppressIntervalMs,
+                           long slowThresholdMs, boolean recoveryEnabled,
+                           AlertDeduplicationGate clusterDedupGate) {
         this.notifiers = List.copyOf(notifiers);
         this.suppressIntervalMs = Math.max(0, suppressIntervalMs);
         this.slowThresholdMs = slowThresholdMs;
         this.recoveryEnabled = recoveryEnabled;
+        this.clusterDedupGate = clusterDedupGate;
     }
 
     /**
@@ -152,7 +181,8 @@ public class AlertDispatcher implements MetricsEventListener {
     }
 
     /**
-     * 分发一条告警：先惰性扫描恢复，再做抑制判断，最后逐个通知并隔离异常。
+     * 分发一条告警：先惰性扫描恢复，再做抑制判断，通过后抢占集群分发权（0.7.0 新增），
+     * 最后逐个通知并隔离异常。
      */
     private void dispatch(GovernanceAlertEvent event) {
         if (notifiers.isEmpty()) {
@@ -164,6 +194,9 @@ public class AlertDispatcher implements MetricsEventListener {
         if (isSuppressed(event)) {
             return;
         }
+        if (clusterDedupGate != null && !acquireClusterDispatchRight(event)) {
+            return;
+        }
         for (GovernanceAlertNotifier notifier : notifiers) {
             try {
                 notifier.notify(event);
@@ -172,6 +205,26 @@ public class AlertDispatcher implements MetricsEventListener {
                         notifier.getName(), event.getType(), e.getMessage());
             }
         }
+    }
+
+    /**
+     * 抢占集群分发权：抢到返回 true 并继续分发；未抢到（窗口内其他实例已分发）
+     * 把事件计入本地抑制计数（供恢复语义沿用）后静默丢弃。
+     *
+     * <p>闸门 TTL = 本机抑制窗口（关闭时取默认 10 秒兜底），保证集群去重窗口
+     * 与单机抑制窗口对齐。
+     */
+    private boolean acquireClusterDispatchRight(GovernanceAlertEvent event) {
+        String dedupKey = event.getType() + "|" + event.getApiKey();
+        long ttl = suppressIntervalMs > 0 ? suppressIntervalMs : DEFAULT_DEDUP_TTL_MS;
+        if (clusterDedupGate.tryAcquire(dedupKey, ttl)) {
+            return true;
+        }
+        SuppressionState state = lastDispatchTime.get(dedupKey);
+        if (state != null) {
+            state.suppressedCount.incrementAndGet();
+        }
+        return false;
     }
 
     /**
@@ -218,8 +271,17 @@ public class AlertDispatcher implements MetricsEventListener {
 
     /**
      * 分发恢复事件：绕过抑制（恢复事件低频且必须送达），异常隔离与普通分发一致。
+     * 开启集群去重时恢复事件同样抢占集群分发权（独立短窗口 30s，与告警窗口解耦），
+     * 保证全集群只补发一条恢复；未抢到的实例已从抑制表移除条目，不会重复触发。
      */
     private void dispatchRecovery(GovernanceAlertEvent event) {
+        if (clusterDedupGate != null
+                && !clusterDedupGate.tryAcquire(event.getType() + "|" + event.getApiKey() + "|recovery",
+                        RECOVERY_DEDUP_TTL_MS)) {
+            log.debug("恢复通知已被其他集群实例分发，跳过 - type: {}, apiKey: {}",
+                    event.getType(), event.getApiKey());
+            return;
+        }
         log.info("告警恢复 - type: {}, apiKey: {}, 抑制期内丢弃: {} 条",
                 event.getType(), event.getApiKey(), event.getSuppressedCount());
         for (GovernanceAlertNotifier notifier : notifiers) {

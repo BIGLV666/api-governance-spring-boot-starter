@@ -1,6 +1,8 @@
 package io.github.biglv666.apigovernance.config;
 
 import io.github.biglv666.apigovernance.alert.GovernanceAlertNotifier;
+import io.github.biglv666.apigovernance.alert.dedup.AlertDeduplicationGate;
+import io.github.biglv666.apigovernance.alert.dedup.RedisAlertDeduplicationGate;
 import io.github.biglv666.apigovernance.alert.internal.AlertDispatcher;
 import io.github.biglv666.apigovernance.alert.webhook.WebhookAlertNotifier;
 import io.github.biglv666.apigovernance.async.aspect.AsyncActionAspect;
@@ -46,6 +48,9 @@ import io.github.biglv666.apigovernance.ratelimit.local.SlidingWindowRateLimiter
 import io.github.biglv666.apigovernance.ratelimit.local.TokenBucketRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.redis.RedisSlidingWindowRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.redis.RedisTokenBucketRateLimiter;
+import io.github.biglv666.apigovernance.ratelimit.rules.InMemoryRateRuleStore;
+import io.github.biglv666.apigovernance.ratelimit.rules.RateRuleStore;
+import io.github.biglv666.apigovernance.ratelimit.rules.RedisRateRuleStore;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
@@ -191,19 +196,26 @@ public class ApiGovernanceAutoConfiguration {
 
     /**
      * 告警分发器：把指标事件转换为告警并分发给所有通知器（含告警风暴抑制）。
-     * 告警关闭或无通知器时为空转实现（零开销）。
+     * 告警关闭或无通知器时为空转实现（零开销）。开启 {@code cluster-dedup-enabled}
+     * 且容器中存在去重闸门时，同一告警全集群只分发一条（0.7.0 新增）。
      */
     @Bean
     @ConditionalOnProperty(prefix = "api.governance.alert", name = "enabled",
             havingValue = "true", matchIfMissing = true)
     public AlertDispatcher alertDispatcher(ApiGovernanceProperties properties,
-                                           ObjectProvider<GovernanceAlertNotifier> notifiers) {
+                                           ObjectProvider<GovernanceAlertNotifier> notifiers,
+                                           ObjectProvider<AlertDeduplicationGate> dedupGate) {
         List<GovernanceAlertNotifier> notifierList = notifiers.orderedStream().toList();
-        log.info("配置告警分发器 - 通知器数量: {}, 抑制窗口: {}ms, 恢复通知: {}",
+        AlertDeduplicationGate gate = properties.getAlert().isClusterDedupEnabled()
+                ? dedupGate.getIfAvailable()
+                : null;
+        log.info("配置告警分发器 - 通知器数量: {}, 抑制窗口: {}ms, 恢复通知: {}, 集群去重: {}",
                 notifierList.size(), properties.getAlert().getSuppressIntervalMs(),
-                properties.getAlert().isRecoveryEnabled() ? "开" : "关");
+                properties.getAlert().isRecoveryEnabled() ? "开" : "关",
+                gate != null ? "开(" + gate.getName() + ")" : "关");
         return new AlertDispatcher(notifierList, properties.getAlert().getSuppressIntervalMs(),
-                properties.getLog().getSlowThresholdMs(), properties.getAlert().isRecoveryEnabled());
+                properties.getLog().getSlowThresholdMs(), properties.getAlert().isRecoveryEnabled(),
+                gate);
     }
 
     // ==================== 限流器插件 ====================
@@ -236,6 +248,44 @@ public class ApiGovernanceAutoConfiguration {
         }
         log.info("配置限流器: 本机令牌桶 (maxEntries: {})", properties.getRateLimit().getMaxEntries());
         return new TokenBucketRateLimiter(properties.getRateLimit().getMaxEntries());
+    }
+
+    // ==================== 动态限流规则存储（0.7.0 新增） ====================
+
+    /**
+     * 动态限流规则存储装配：类级 {@code dynamic-rules.enabled} 开关 + 方法级
+     * {@code rate-limit.type} 联动选择实现 —— local 用进程内存（单节点生效），
+     * redis 用 Redis Hash + 版本号（全集群一致）。注册自定义
+     * {@code RateRuleStore} Bean 可完全替换。
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(prefix = "api.governance.rate-limit.dynamic-rules", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    static class DynamicRateRulesConfiguration {
+
+        @Bean
+        @ConditionalOnMissingBean(RateRuleStore.class)
+        @ConditionalOnProperty(prefix = "api.governance.rate-limit", name = "type",
+                havingValue = "local", matchIfMissing = true)
+        public RateRuleStore inMemoryRateRuleStore(ApiGovernanceProperties properties) {
+            log.info("配置动态限流规则存储: in-memory（单节点生效）");
+            return new InMemoryRateRuleStore(
+                    properties.getRateLimit().getDynamicRules().getMaxRules());
+        }
+
+        @Bean(destroyMethod = "close")
+        @ConditionalOnMissingBean(RateRuleStore.class)
+        @ConditionalOnProperty(prefix = "api.governance.rate-limit", name = "type",
+                havingValue = "redis")
+        public RateRuleStore redisRateRuleStore(ApiGovernanceProperties properties,
+                                                StringRedisTemplate redisTemplate) {
+            ApiGovernanceProperties.RateLimit.DynamicRules dynamicRules =
+                    properties.getRateLimit().getDynamicRules();
+            log.info("配置动态限流规则存储: redis（全集群一致，刷新间隔 {}ms）",
+                    dynamicRules.getRefreshIntervalMs());
+            return new RedisRateRuleStore(redisTemplate, dynamicRules.getRefreshIntervalMs(),
+                    dynamicRules.getMaxRules());
+        }
     }
 
     /**
@@ -347,8 +397,9 @@ public class ApiGovernanceAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public GovernanceAspect governanceAspect(FilterChain filterChain,
-                                             ApiGovernanceProperties properties) {
-        return new GovernanceAspect(filterChain, properties);
+                                             ApiGovernanceProperties properties,
+                                             ObjectProvider<RateRuleStore> rateRuleStores) {
+        return new GovernanceAspect(filterChain, properties, rateRuleStores.getIfAvailable());
     }
 
     /**
@@ -464,10 +515,11 @@ public class ApiGovernanceAutoConfiguration {
             FilterChain filterChain,
             MetricsRegistry metricsRegistry,
             ObjectProvider<AsyncHandlerRegistry> asyncHandlerRegistry,
-            ObjectProvider<AsyncExecutorProvider> asyncExecutorProvider) {
+            ObjectProvider<AsyncExecutorProvider> asyncExecutorProvider,
+            ObjectProvider<RateRuleStore> rateRuleStore) {
         return new GovernanceManagementController(properties, rateLimiter.getIfAvailable(),
                 filterChain, metricsRegistry, asyncHandlerRegistry.getIfAvailable(),
-                asyncExecutorProvider.getIfAvailable());
+                asyncExecutorProvider.getIfAvailable(), rateRuleStore.getIfAvailable());
     }
 
     /**
@@ -498,8 +550,28 @@ public class ApiGovernanceAutoConfiguration {
         return registration;
     }
 
-    // ==================== Redis 限流（可选依赖） ====================
+    // ==================== 集群告警去重（0.7.0 新增，可选依赖） ====================
 
+    /**
+     * Redis 集群告警去重闸门：{@code alert.cluster-dedup-enabled=true} 且类路径存在
+     * Spring Data Redis 时装配。独立于限流 type —— 本机限流的应用也可用自有 Redis
+     * 做告警去重。注册自定义 {@code AlertDeduplicationGate} Bean 可替换。
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = "org.springframework.data.redis.core.StringRedisTemplate")
+    static class AlertClusterDedupConfiguration {
+
+        @Bean
+        @ConditionalOnMissingBean(AlertDeduplicationGate.class)
+        @ConditionalOnProperty(prefix = "api.governance.alert", name = "cluster-dedup-enabled",
+                havingValue = "true")
+        public AlertDeduplicationGate redisAlertDeduplicationGate(StringRedisTemplate redisTemplate) {
+            log.info("配置集群告警去重闸门: redis");
+            return new RedisAlertDeduplicationGate(redisTemplate);
+        }
+    }
+
+    // ==================== Redis 限流（可选依赖） ====================
     /**
      * Redis 限流器装配：仅当 {@code StringRedisTemplate} 在类路径且配置 type=redis 时生效。
      * 「Redis 只封装」—— 内部实现仅为 Redis + Lua 脚本的封装，不掺杂业务逻辑。
@@ -531,5 +603,10 @@ public class ApiGovernanceAutoConfiguration {
             boolean failClose = "close".equals(properties.getRateLimit().getFailStrategy());
             return new FailSafeRateLimiter(delegate, failClose, alertDispatcher.getIfAvailable());
         }
+
+        /**
+         * Redis 版动态规则存储已迁移至 {@link DynamicRateRulesConfiguration}
+         * （类级 dynamic-rules.enabled 开关统一管理，0.7.0）。
+         */
     }
 }

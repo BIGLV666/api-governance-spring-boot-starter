@@ -15,6 +15,9 @@
 | GET | `/rate-limiter/count?key=` | 指定 key 当前计数 |
 | POST | `/rate-limiter/reset?key=` | 重置指定 key |
 | POST | `/rate-limiter/reset-all` | 重置全部限流 |
+| GET | `/rate-limiter/rules` | 动态限流规则列表（0.7.0 新增） |
+| PUT | `/rate-limiter/rules` | 新增/覆盖一条动态规则，立即生效（0.7.0 新增，JSON body） |
+| DELETE | `/rate-limiter/rules?pattern=` | 删除一条动态规则（幂等，0.7.0 新增） |
 | GET | `/metrics` | 全部 API 指标汇总（0.4.0 起支持 `page`/`size` 分页） |
 | GET | `/async/handlers` | 异步 Handler 注册清单（0.5.0 新增） |
 | GET | `/async/status` | 异步线程池水位与插件状态（0.5.0 新增） |
@@ -43,8 +46,30 @@ api:
 未配置令牌时行为与 0.1.0 完全一致。
 
 **写操作开关（0.4.0 新增）**：`management.mutations-enabled: false` 可一键禁用全部变更类端点
-（`POST /rate-limiter/reset*`、`DELETE /metrics*`），禁用时返回失败提示，只读端点不受影响，
+（`POST /rate-limiter/reset*`、`PUT /rate-limiter/rules`、`DELETE /rate-limiter/rules`、
+`DELETE /metrics*`），禁用时返回失败提示，只读端点不受影响，
 适合只读监控场景。
+
+**动态限流规则端点（0.7.0 新增）**：
+
+```bash
+# 提交规则（pattern 支持尾部 * 前缀通配；limit: -1=放开 / 0=封禁 / >0=上限；window 缺省取全局 default-window）
+curl -X PUT http://host:8080/api-governance/rate-limiter/rules \
+  -H "Content-Type: application/json" -H "X-Governance-Token: $GOVERNANCE_TOKEN" \
+  -d '{"pattern": "com.x.OrderController#create", "limit": 100, "window": 60}'
+
+# {"success": true, "message": "规则已生效", "pattern": "com.x.OrderController#create", "limit": 100, "window": 60}
+
+# 查询全部规则（含存储类型 in-memory / redis 与写入时间）
+curl http://host:8080/api-governance/rate-limiter/rules
+
+# 删除规则（幂等：pattern 不存在同样返回成功）
+curl -X DELETE "http://host:8080/api-governance/rate-limiter/rules?pattern=com.x.OrderController%23create"
+```
+
+> 参数校验失败（缺 pattern/limit、中间通配、window&lt;1、超出 max-rules 上限）与 Redis 存储写入
+> 失败均返回 `{"success": false, "message": "..."}`，不会产生半写入状态。
+> 语义与优先级详见[限流 → 动态限流规则](rate-limiting.md)。
 
 **慢方法聚合接口示例**：
 

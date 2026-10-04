@@ -24,6 +24,10 @@ api:
       status-code: 429                # 限流拒绝的 HTTP 状态码
       message: "请求过于频繁，请稍后重试"  # 限流拒绝提示语
       fail-strategy: open             # 限流器故障降级：open=放行 / close=503 拒绝（作用于 Redis）
+      dynamic-rules:                  # 0.7.0 新增：动态限流规则
+        enabled: true                 # 总开关（默认开，无规则时零行为变化）
+        refresh-interval-ms: 5000     # Redis 模式版本轮询间隔（集群传播延迟上界）
+        max-rules: 1000               # 规则数上限（防止误操作灌爆存储）
     filters:                          # 内置过滤器开关（0.3.0 新增），也可注册同类型 Bean 覆盖
       metadata-collector: true
       traffic-statistics: true
@@ -39,6 +43,7 @@ api:
       enabled: true                   # 告警总开关
       suppress-interval-ms: 10000     # 同 (类型, apiKey) 告警最小间隔（防风暴）
       recovery-enabled: true          # 0.6.0 新增：状况解除后补发恢复通知（携带抑制计数）
+      cluster-dedup-enabled: false    # 0.7.0 新增：多实例告警集群去重（需 Redis，SET NX 抢占）
       webhook:
         enabled: false                # 内置 Webhook 通知器
         url: ""                       # webhook 地址（钉钉/企微/飞书机器人）

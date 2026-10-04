@@ -19,6 +19,17 @@
 
 > 未引入 `spring-boot-starter-web`（不捆绑内嵌容器）、未引入 Lombok，
 > 告警 Webhook 基于 JDK 17 HttpClient（零第三方依赖），
-> Redis 为可选依赖，仅在使用分布式限流时引入。
+> Redis 为可选依赖，仅在使用分布式限流或集群告警去重时引入。
+
+## 兼容矩阵（0.7.0 起）
+
+| 维度 | 范围 | 说明 |
+|------|------|------|
+| Spring Boot | 3.3.x – 3.5.x | 基线 3.5.x；CI 矩阵覆盖 3.3.13 / 3.4.13 / 3.5.16 × JDK 17/21 |
+| Java | 17 – 21 | 编译目标 17（字节码向后兼容），CI 矩阵在 17 与 21 上全量回归 |
+| 动态规则存储 | 随 `rate-limit.type` | local → 进程内快照（单节点）；redis → Redis Hash + 版本号（全集群） |
+| 集群告警去重 | 需 Spring Data Redis | `cluster-dedup-enabled=true` 且类路径有 Redis 时装配，独立于限流 type |
+
+> Spring Boot 4.x（Spring Framework 7）尚未适配，计划于后续版本支持。
 
 ---

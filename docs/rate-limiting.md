@@ -167,4 +167,64 @@ api:
 用同名头覆盖默认值；自定义 `PreFilter` 写入的头同样会随拒绝响应返回。
 放行路径不携带这些头（避免 Redis 限流下每次请求多一次计数查询）。
 
+### 9. 动态限流规则（0.7.0 新增）
+
+运行期经管理接口提交的限流规则，**无需重启 / 重新发布**即可调整限流行为，
+用于应急处置（事故时临时收紧、误杀时放开、临时封禁）：
+
+```bash
+# 给指定接口临时限流（100 次 / 60 秒）
+curl -X PUT http://host:8080/api-governance/rate-limiter/rules \
+  -H "Content-Type: application/json" \
+  -H "X-Governance-Token: $GOVERNANCE_TOKEN" \
+  -d '{"pattern": "com.x.OrderController#create", "limit": 100, "window": 60}'
+
+# 前缀通配：整个控制器的所有端点
+curl -X PUT ... -d '{"pattern": "com.x.OrderController#*", "limit": 50, "window": 1}'
+
+# limit=-1 显式放开（覆盖接口上的 @RateLimit 注解）
+curl -X PUT ... -d '{"pattern": "com.x.OrderController#create", "limit": -1}'
+
+# limit=0 封禁（全部请求被 429 拒绝）
+curl -X PUT ... -d '{"pattern": "com.x.OrderController#create", "limit": 0}'
+
+# 查询 / 删除
+curl http://host:8080/api-governance/rate-limiter/rules
+curl -X DELETE "http://host:8080/api-governance/rate-limiter/rules?pattern=com.x.OrderController%23create"
+```
+
+**语义与优先级**：
+
+- 优先级：**动态规则 &gt; 方法 `@RateLimit` &gt; 类 `@RateLimit` &gt; 全局默认**；
+  规则只覆盖 `limit` / `window`，不影响 SpEL 参数维度限流键；
+- `pattern` 支持精确匹配与**尾部 `*` 前缀通配**（普通 startsWith 语义，无单词边界：
+  `com.x.User*` 会同时命中 `UserController` 与 `UserV2Controller`，需精确范围时请写到类名全称）；
+- 多条规则命中同一 API 时：精确 &gt; 最长前缀；
+- `limit`: -1 = 不限流（可覆盖注解）/ 0 = 封禁 / &gt;0 = 窗口内上限。
+
+**存储与集群一致性**（随 `rate-limit.type` 联动）：
+
+| type | 存储 | 写操作生效范围 |
+|------|------|---------------|
+| `local`（默认） | 内存（`in-memory`，volatile 快照读写无锁） | 仅当前实例 |
+| `redis` | Redis Hash + 版本号（`redis`） | 全集群，传播延迟上界 = `refresh-interval-ms`（默认 5s） |
+
+Redis 存储故障时 fail-stale：沿用最后一次成功快照继续生效（限频 warn），绝不影响业务请求；
+恢复后自动追上最新版本。规则数上限 `max-rules`（默认 1000）防止误操作灌爆存储。
+
+相关配置：
+
+```yaml
+api:
+  governance:
+    rate-limit:
+      dynamic-rules:
+        enabled: true               # 动态规则总开关（默认开，无规则时零行为变化）
+        refresh-interval-ms: 5000   # Redis 模式版本轮询间隔（集群传播延迟上界）
+        max-rules: 1000             # 规则数上限
+```
+
+> 自定义存储：注册 `RateRuleStore` Bean 可完全替换内置实现（接口契约：`findMatch`
+> 位于请求热路径必须无锁、不做远程调用；`put` / `remove` 由管理接口低频调用）。
+
 ---

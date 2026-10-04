@@ -12,6 +12,8 @@ import io.github.biglv666.apigovernance.config.ApiGovernanceProperties;
 import io.github.biglv666.apigovernance.exception.GovernanceException;
 import io.github.biglv666.apigovernance.filter.FilterChain;
 import io.github.biglv666.apigovernance.filter.FilterContext;
+import io.github.biglv666.apigovernance.ratelimit.rules.DynamicRateRule;
+import io.github.biglv666.apigovernance.ratelimit.rules.RateRuleStore;
 import io.github.biglv666.apigovernance.web.HttpRequestContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -78,6 +80,12 @@ public class GovernanceAspect {
     /** 全局配置。 */
     private final ApiGovernanceProperties properties;
 
+    /**
+     * 动态限流规则存储（0.7.0 新增，可为 null：动态规则关闭或用户替换切面时）。
+     * 热路径只读不可变快照，无规则时开销为一次判空。
+     */
+    private final RateRuleStore rateRuleStore;
+
     /** SpEL 表达式解析器（限流键）。 */
     private final ExpressionParser rateLimitKeyParser = new SpelExpressionParser();
 
@@ -94,14 +102,27 @@ public class GovernanceAspect {
     private final Map<Class<?>, Set<String>> overloadedMethodNamesCache = new ConcurrentHashMap<>();
 
     /**
-     * 构造切面。
+     * 构造切面（兼容 0.6.0 签名，等价于不启用动态规则）。
      *
      * @param filterChain 过滤器链
      * @param properties  全局配置
      */
     public GovernanceAspect(FilterChain filterChain, ApiGovernanceProperties properties) {
+        this(filterChain, properties, null);
+    }
+
+    /**
+     * 构造切面。
+     *
+     * @param filterChain   过滤器链
+     * @param properties    全局配置
+     * @param rateRuleStore 动态限流规则存储（null 表示不启用动态规则覆盖）
+     */
+    public GovernanceAspect(FilterChain filterChain, ApiGovernanceProperties properties,
+                            RateRuleStore rateRuleStore) {
         this.filterChain = filterChain;
         this.properties = properties;
+        this.rateRuleStore = rateRuleStore;
     }
 
     /**
@@ -346,6 +367,46 @@ public class GovernanceAspect {
                 log.debug("启用限流 - API: {}, limit: {}/{}(秒), keySuffix: {}",
                         context.getApiKey(), limit, window, context.getRateLimitKeySuffix());
             }
+        }
+
+        // 0.7.0 动态规则覆盖：动态规则 > 方法注解 > 类注解 > 全局默认。
+        // 放在注解解析之后、与是否启用注解限流无关 —— 规则须能给「原本不限流」的接口加限流
+        applyDynamicRateRule(context);
+    }
+
+    /**
+     * 应用动态限流规则覆盖（0.7.0 新增）。
+     *
+     * <p>命中规则时整体覆盖注解 / yml 解析结果（只覆盖 {@code limit}/{@code window}，
+     * 不影响 SpEL 参数维度键）：
+     * <ul>
+     *   <li>{@code limit = -1}：显式放开 —— 即使接口上有 {@code @RateLimit} 也放行；</li>
+     *   <li>{@code limit = 0}：封禁 —— 该接口全部请求被拒绝；</li>
+     *   <li>{@code limit > 0}：正常限流（含给原本不限流的接口临时加限流）。</li>
+     * </ul>
+     *
+     * <p>存储缺失或无命中规则时直接返回，代码路径与 0.6.0 一致（一次判空 + 一次查找）。
+     */
+    private void applyDynamicRateRule(FilterContext context) {
+        if (rateRuleStore == null) {
+            return;
+        }
+        DynamicRateRule rule = rateRuleStore.findMatch(context.getApiKey()).orElse(null);
+        if (rule == null) {
+            return;
+        }
+        if (rule.getLimit() < 0) {
+            context.setRateLimitEnabled(false);
+            context.setRateLimit(-1);
+            context.setWindow(rule.getWindow());
+        } else {
+            context.setRateLimitEnabled(true);
+            context.setRateLimit(rule.getLimit());
+            context.setWindow(rule.getWindow());
+        }
+        if (log.isDebugEnabled()) {
+            log.debug("动态规则覆盖限流 - API: {}, rule: {}, limit: {}/{}(秒)",
+                    context.getApiKey(), rule.getPattern(), rule.getLimit(), rule.getWindow());
         }
     }
 

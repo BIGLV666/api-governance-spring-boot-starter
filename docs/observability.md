@@ -126,4 +126,23 @@ api:
   惰性扫描补发恢复（系统完全安静时恢复通知会延迟到下一个事件到达）；
 - 恢复事件本身不受抑制窗口约束；钉钉/企微/飞书文案以「【API治理恢复】」前缀区分。
 
+**集群告警去重（0.7.0 新增，`api.governance.alert.cluster-dedup-enabled` 默认关）**：
+
+抑制窗口是 JVM 内状态，多实例部署时同一告警会由每个实例各发一条 —— 10 个实例
+= 10 条相同钉钉消息。开启后，本机抑制通过的事件再经 Redis `SET NX EX` 抢占集群分发权，
+同一 `(告警类型, apiKey)` 每抑制窗口**全集群只发一条**；恢复通知同样去重（独立短窗口 30s）。
+
+```yaml
+api:
+  governance:
+    alert:
+      cluster-dedup-enabled: true   # 需类路径存在 Spring Data Redis；独立于 rate-limit.type
+```
+
+- 抢占 TTL 与本机抑制窗口对齐（`suppress-interval-ms`）；未抢到的实例把事件计入本地
+  抑制计数后丢弃，恢复语义沿用；
+- **fail-open**：Redis 故障时回退为各实例独立分发（与未开启一致），告警绝不因去重组件
+  故障而丢失；每分钟限频一条 warn；
+- 注册自定义 `AlertDeduplicationGate` Bean 可替换内置 Redis 实现。
+
 ---

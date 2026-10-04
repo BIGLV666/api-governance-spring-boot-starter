@@ -6,13 +6,13 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.2.0</version>
+        <version>3.5.16</version>
         <relativePath/>
     </parent>
 
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.6.0</version>
+    <version>0.7.0</version>
     <name>API Governance Spring Boot Starter</name>
     <description>轻量级、插件化的 API 治理 Spring Boot Starter，提供 AOP 拦截、过滤器管道、限流、指标和管理接口。</description>
     <url>https://github.com/BIGLV666/api-governance-spring-boot-starter</url>

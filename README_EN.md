@@ -45,6 +45,15 @@ strategies, admin endpoints — with **no heavy external dependencies**.
 - ✅ **Observable async hooks** (new in 0.5.0) — execution metrics (count/duration/pool gauges), admin
   endpoints for handler registry, queue-rejection alerting, startup cross-validation of action names,
   and a built-in HTTP-context snapshot enricher.
+- ✅ **Dynamic rate-limit rules** (new in 0.7.0) — submit rules via admin endpoints at runtime
+  (trailing-`*` prefix patterns supported): tighten, lift or ban an endpoint **without restart or
+  redeploy**. Single-node with `type=local`; cluster-wide within one refresh interval with `type=redis`
+  (fail-stale on Redis outage, never affects requests).
+- ✅ **Cluster-wide alert deduplication** (new in 0.7.0) — with multiple instances, the same alert is
+  delivered once per cluster per suppression window (recovery notices included), via Redis `SET NX`
+  arbitration; fail-open falls back to per-instance delivery when Redis is down.
+- ✅ **Boot 3.3–3.5 compatibility matrix** (new in 0.7.0) — baseline Spring Boot 3.5; CI runs the full
+  suite against 3.3/3.4/3.5 × JDK 17/21.
 
 ---
 
@@ -56,7 +65,7 @@ strategies, admin endpoints — with **no heavy external dependencies**.
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.6.0</version>
+    <version>0.7.0</version>
 </dependency>
 ```
 
@@ -125,6 +134,10 @@ api:
       status-code: 429
       message: "Too many requests, please retry later"
       fail-strategy: open             # limiter failure: open=allow / close=503 (applies to Redis)
+      dynamic-rules:                  # new in 0.7.0: dynamic rate-limit rules
+        enabled: true                 # master switch (no rules = zero behavior change)
+        refresh-interval-ms: 5000     # redis mode version poll interval (cluster propagation bound)
+        max-rules: 1000               # rule count cap
     filters:                          # built-in filter switches (new in 0.3.0); same-type beans also override
       metadata-collector: true
       traffic-statistics: true
@@ -139,6 +152,7 @@ api:
     alert:
       enabled: true
       suppress-interval-ms: 10000     # min interval per (type, apiKey) to prevent alert storms
+      cluster-dedup-enabled: false    # new in 0.7.0: cluster-wide alert dedup (needs Redis, SET NX)
       webhook:
         enabled: false
         url: ""                       # webhook endpoint (DingTalk/WeCom/Feishu bot)
@@ -469,6 +483,9 @@ Base path defaults to `/api-governance` (configurable):
 | GET | `/rate-limiter/count?key=` | current count for a key |
 | POST | `/rate-limiter/reset?key=` | reset a key |
 | POST | `/rate-limiter/reset-all` | reset all |
+| GET | `/rate-limiter/rules` | dynamic rate-limit rules list (new in 0.7.0) |
+| PUT | `/rate-limiter/rules` | upsert one dynamic rule, effective immediately (new in 0.7.0, JSON body) |
+| DELETE | `/rate-limiter/rules?pattern=` | delete one dynamic rule (idempotent, new in 0.7.0) |
 | GET | `/metrics` | all API metrics summary (supports `page`/`size` since 0.4.0) |
 | GET | `/async/handlers` | registered async handler list (new in 0.5.0) |
 | GET | `/async/status` | async thread-pool status (new in 0.5.0) |
@@ -564,6 +581,24 @@ and `correlationId` independently — do not use `traceId` for consumer idempote
 ---
 
 ## 13. Version Upgrades
+
+### Upgrading from 0.6.0 to 0.7.0
+
+All changes are additive, with three behavioral notes:
+
+1. **Spring Boot baseline moved from 3.2.0 to 3.5.16**: this starter's full suite passes; host
+   applications should follow Boot's own migration notes for 3.3/3.4/3.5. The declared support range
+   is Boot 3.3 – 3.5 (CI matrix covers 3.3.13 / 3.4.13 / 3.5.16 × JDK 17/21);
+2. **Dynamic rate-limit rules are enabled by default**
+   (`api.governance.rate-limit.dynamic-rules.enabled: true`): with no rules submitted the behaviour is
+   byte-identical to 0.6.0; disable explicitly if you do not want the rules endpoints exposed;
+3. **One background daemon thread in Redis mode** (`dynamic-rules` on, `type=redis`): polls the rule
+   version once per `refresh-interval-ms`. Disable `dynamic-rules` to keep 0.6.0 connection behaviour.
+
+Additive items: three admin endpoints `GET/PUT/DELETE /rate-limiter/rules` (behind the existing
+`auth-token` auth and `mutations-enabled` switch), the `alert.cluster-dedup-enabled` option (default
+off, requires Spring Data Redis on the classpath), and new constructor overloads on
+`GovernanceManagementController` / `AlertDispatcher` (old signatures deprecated but still available).
 
 ### Upgrading from 0.4.0 to 0.5.0
 
