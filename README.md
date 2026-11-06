@@ -42,6 +42,8 @@
 - ✅ **动态限流规则**（0.7.0 新增）：管理接口运行期提交限流规则（支持尾部 `*` 通配），**无需重启即可调整/放开/封禁**；local 模式单节点生效，Redis 模式全集群秒级一致，存储故障 fail-stale 不影响业务。
 - ✅ **集群告警去重**（0.7.0 新增）：多实例部署时同一告警每抑制窗口全集群只发一条（含恢复通知），Redis `SET NX` 抢占，故障 fail-open 回退单机行为。
 - ✅ **Boot 3.3–3.5 兼容矩阵**（0.7.0 新增）：基线 Spring Boot 3.5，CI 覆盖 3.3/3.4/3.5 × JDK 17/21 全量回归。
+- ✅ **规则生命周期闭环**（0.8.0 新增）：规则 TTL 自动失效（临时封禁/收紧到期即恢复，无需人工解除）、操作人/原因元数据、生效规则解释端点（一键回答「为什么没限流」）、变更审计与导入/导出/启动种子（规则即代码）。
+- ✅ **Actuator 健康与 Info**（0.8.0 新增）：`/actuator/health` 暴露限流器故障、规则存储陈旧与线程池饱和度，按 fail-strategy 区分 UP/DOWN，避免 Redis 抖动误触发探针重启；`/actuator/info` 展示实际生效配置。
 
 ---
 
@@ -53,7 +55,7 @@
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.7.0</version>
+    <version>0.8.0</version>
 </dependency>
 ```
 
@@ -105,14 +107,15 @@ public class UserController {
 | 文档 | 内容 |
 |------|------|
 | [配置参考](docs/configuration.md) | `api.governance.*` 全部配置项与默认值 |
-| [限流](docs/rate-limiting.md) | 本机 / Redis 限流、算法、SpEL 参数维度、标准响应头、故障降级、动态规则热更新 |
+| [限流](docs/rate-limiting.md) | 本机 / Redis 限流、算法、SpEL 参数维度、标准响应头、故障降级、动态规则 TTL / 导入导出 / 启动种子 |
 | [过滤器管道](docs/filters.md) | 自定义 `PreFilter` / `PostFilter` 插件与内置过滤器 |
 | [异步方法插件](docs/async.md) | `@AsyncAction` / `@AsyncHandler` 与异步可观测性（[完整契约](docs/ASYNC_ACTIONS.md)） |
-| [可观测性](docs/observability.md) | 内存指标、Micrometer 桥接、Grafana 面板、告警与恢复通知 |
-| [后台管理接口](docs/management-api.md) | 管理端点、鉴权、写操作开关 |
+| [可观测性](docs/observability.md) | 内存指标、Micrometer 桥接、Grafana 面板、告警、Actuator 健康与 Info |
+| [后台管理接口](docs/management-api.md) | 管理端点、规则解释 / 审计 / 导入导出、鉴权、写操作开关 |
 | [分布式链路追踪](docs/tracing.md) | OpenTelemetry 集成与可选依赖说明 |
 | [依赖说明](docs/dependencies.md) | 依赖矩阵与可选依赖策略 |
 | [版本升级](docs/upgrade.md) | 各版本迁移注意事项 |
+| [更新日志](CHANGELOG.md) | 按版本汇总的新增、变更与修复 |
 | [故障演练](drills/README.md) | Redis 故障降级 / 线程池饱和 / 告警生命周期（可复现） |
 | [可运行示例](examples/api-governance-example) | 最小示例工程（含演练 profile） |
 | [English](README_EN.md) | English overview |

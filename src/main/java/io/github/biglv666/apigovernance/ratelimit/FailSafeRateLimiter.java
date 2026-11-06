@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 限流器故障降级装饰器 —— 统一处理限流器（主要是 Redis 分布式限流）执行异常。
@@ -49,6 +50,12 @@ public class FailSafeRateLimiter implements RateLimiter {
      */
     private final AtomicBoolean failedSinceLastSuccess = new AtomicBoolean(false);
 
+    /** 最近一次成功调用时间戳（毫秒，0.8.0 新增，供健康检查使用）。 */
+    private final AtomicLong lastSuccessMs = new AtomicLong();
+
+    /** 最近一次故障时间戳（毫秒，0.8.0 新增，供健康检查使用）。 */
+    private final AtomicLong lastFailureMs = new AtomicLong();
+
     /**
      * 构造故障降级装饰器。
      *
@@ -66,6 +73,7 @@ public class FailSafeRateLimiter implements RateLimiter {
     public boolean tryAcquire(String key, int limit, int windowSeconds) {
         try {
             boolean pass = delegate.tryAcquire(key, limit, windowSeconds);
+            lastSuccessMs.set(System.currentTimeMillis());
             // 故障后首次成功：上报恢复信号（内部有「无活动告警则跳过」的去重语义）
             if (failedSinceLastSuccess.compareAndSet(true, false) && alertDispatcher != null) {
                 alertDispatcher.markRecovered(GovernanceAlertEvent.Type.RATE_LIMITER_FAILURE,
@@ -74,6 +82,7 @@ public class FailSafeRateLimiter implements RateLimiter {
             return pass;
         } catch (Exception e) {
             failedSinceLastSuccess.set(true);
+            lastFailureMs.set(System.currentTimeMillis());
             log.error("限流器执行故障 - limiter: {}, key: {}, 策略: {}, 错误: {}",
                     delegate.getName(), key, failClose ? "close(拒绝)" : "open(放行)", e.getMessage(), e);
             if (alertDispatcher != null) {
@@ -107,5 +116,25 @@ public class FailSafeRateLimiter implements RateLimiter {
     @Override
     public void resetAll() {
         delegate.resetAll();
+    }
+
+    /** 最近一次成功调用时间戳（毫秒，0 = 尚未成功；0.8.0 新增）。 */
+    public long getLastSuccessMs() {
+        return lastSuccessMs.get();
+    }
+
+    /** 最近一次故障时间戳（毫秒，0 = 从未故障；0.8.0 新增）。 */
+    public long getLastFailureMs() {
+        return lastFailureMs.get();
+    }
+
+    /** 自上次成功以来是否发生过故障（0.8.0 新增，健康检查使用）。 */
+    public boolean isFailedSinceLastSuccess() {
+        return failedSinceLastSuccess.get();
+    }
+
+    /** 是否为故障拒绝模式（0.8.0 新增，健康检查使用）。 */
+    public boolean isFailClose() {
+        return failClose;
     }
 }

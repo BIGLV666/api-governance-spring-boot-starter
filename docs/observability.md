@@ -146,3 +146,41 @@ api:
 - 注册自定义 `AlertDeduplicationGate` Bean 可替换内置 Redis 实现。
 
 ---
+
+## Actuator 健康检查与 Info（0.8.0 新增）
+
+类路径存在 `spring-boot-starter-actuator` 时自动注册（未引入则完全不装配，核心能力不受影响）：
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+```
+
+**`/actuator/health`** 暴露 `apiGovernance` 组件状态：
+
+| 字段 | 说明 |
+|------|------|
+| `limiter.failureActive` | 限流器最近一次故障后是否尚未恢复（Redis 恢复后首个成功请求清零） |
+| `limiter.lastSuccess` / `lastFailure` | 最近成功 / 失败时间戳 |
+| `ruleStore.healthy` / `stale` | 规则存储健康状态；`stale` = 超过 `refresh-interval-ms × health-stale-multiplier` 未成功刷新 |
+| `ruleStore.ruleCount` | 当前未过期规则数 |
+| `asyncExecutor.saturated` | 异步线程池是否已饱和（仅告警，不判 DOWN） |
+| `warnings` | 人类可读的降级提示列表 |
+
+**UP / DOWN 判定遵循 fail-strategy，避免误触发 K8s 重启**：
+
+- `fail-strategy=open`（默认，可用性优先）：限流器故障 / 规则存储陈旧仍返回 **UP**，只在
+  `warnings` 中提示；
+- `fail-strategy=close`（配额优先）：上述情况返回 **DOWN**，让探针按既定策略处置。
+
+关闭健康指示器：`api.governance.management.health-enabled=false`。判定器异常时返回
+`UNKNOWN` 而非抛出，绝不影响 `/actuator/health` 整体响应。
+
+**`/actuator/info`** 暴露 `apiGovernance` 节点：组件版本、治理总开关、限流类型/算法/
+默认值/故障策略/动态规则开关、告警与追踪开关 —— 用于线上确认实际生效配置（yml 拼写错误、
+环境变量未注入时一眼可见）。
+
+---

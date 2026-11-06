@@ -6,12 +6,13 @@ import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.annotation.Pointcut;
 import org.aspectj.lang.reflect.MethodSignature;
 import io.github.biglv666.apigovernance.annotation.NoLog;
-import io.github.biglv666.apigovernance.annotation.RateLimit;
 import io.github.biglv666.apigovernance.annotation.Skip;
 import io.github.biglv666.apigovernance.config.ApiGovernanceProperties;
 import io.github.biglv666.apigovernance.exception.GovernanceException;
 import io.github.biglv666.apigovernance.filter.FilterChain;
 import io.github.biglv666.apigovernance.filter.FilterContext;
+import io.github.biglv666.apigovernance.ratelimit.RateLimitPolicy;
+import io.github.biglv666.apigovernance.ratelimit.RateLimitPolicyResolver;
 import io.github.biglv666.apigovernance.ratelimit.rules.DynamicRateRule;
 import io.github.biglv666.apigovernance.ratelimit.rules.RateRuleStore;
 import io.github.biglv666.apigovernance.web.HttpRequestContext;
@@ -321,77 +322,34 @@ public class GovernanceAspect {
     }
 
     /**
-     * 解析限流配置并写入上下文。
+     * 解析限流配置并写入上下文（0.8.0 起委托 {@link RateLimitPolicyResolver}）。
      *
-     * <p>优先级：方法 {@link RateLimit} &gt; 类 {@link RateLimit} &gt; 全局默认配置。
-     * 注解中 {@code -1} 表示回退到下一级默认值。
+     * <p>优先级：动态规则 &gt; 方法 {@link RateLimit} &gt; 类 {@link RateLimit} &gt;
+     * 全局默认配置。注解中 {@code limit < 0} 表示回退到下一级默认值。
+     *
+     * <p>SpEL 参数键是否解析沿用 0.7.0 语义：取决于<b>动态规则之前</b>是否已启用限流，
+     * 动态规则只覆盖 {@code limit}/{@code window}，不改变参数维度键。
      */
     private void resolveRateLimit(Class<?> targetClass, Method method, FilterContext context) {
-        RateLimit methodAnn = AnnotatedElementUtils.findMergedAnnotation(method, RateLimit.class);
-        RateLimit classAnn = AnnotatedElementUtils.findMergedAnnotation(targetClass, RateLimit.class);
+        RateLimitPolicy policy = RateLimitPolicyResolver.resolve(targetClass, method,
+                context.getApiKey(), properties, rateRuleStore);
 
-        int limit;
-        int window;
-        if (methodAnn != null) {
-            limit = methodAnn.limit();
-            window = methodAnn.window();
-        } else if (classAnn != null) {
-            limit = classAnn.limit();
-            window = classAnn.window();
-        } else {
-            limit = -1;
-            window = -1;
-        }
-
-        // -1 回退全局默认
-        if (limit < 0) {
-            limit = properties.getRateLimit().getDefaultLimit();
-        }
-        if (window <= 0) {
-            window = properties.getRateLimit().getDefaultWindow();
-        }
-        if (window <= 0) {
-            window = 1;
-        }
-
-        // limit >= 0 表示启用限流（0 = 禁止访问，>0 = 正常限流）
-        if (limit >= 0) {
+        // 注解 / 全局默认（动态规则之前）的结果：limit >= 0 表示启用限流
+        if (policy.isAnnotationEnabled()) {
             context.setRateLimitEnabled(true);
-            context.setRateLimit(limit);
-            context.setWindow(window);
+            context.setRateLimit(policy.getAnnotationLimit());
+            context.setWindow(policy.getAnnotationWindow());
             // 解析参数维度限流键后缀（@RateLimit.key SpEL），失败时自动回退接口级限流
-            String keyExpression = methodAnn != null ? methodAnn.key()
-                    : (classAnn != null ? classAnn.key() : "");
-            applyRateLimitKey(method, keyExpression, context);
+            applyRateLimitKey(method, policy.getKeyExpression(), context);
             if (log.isDebugEnabled()) {
                 log.debug("启用限流 - API: {}, limit: {}/{}(秒), keySuffix: {}",
-                        context.getApiKey(), limit, window, context.getRateLimitKeySuffix());
+                        context.getApiKey(), policy.getAnnotationLimit(),
+                        policy.getAnnotationWindow(), context.getRateLimitKeySuffix());
             }
         }
 
-        // 0.7.0 动态规则覆盖：动态规则 > 方法注解 > 类注解 > 全局默认。
-        // 放在注解解析之后、与是否启用注解限流无关 —— 规则须能给「原本不限流」的接口加限流
-        applyDynamicRateRule(context);
-    }
-
-    /**
-     * 应用动态限流规则覆盖（0.7.0 新增）。
-     *
-     * <p>命中规则时整体覆盖注解 / yml 解析结果（只覆盖 {@code limit}/{@code window}，
-     * 不影响 SpEL 参数维度键）：
-     * <ul>
-     *   <li>{@code limit = -1}：显式放开 —— 即使接口上有 {@code @RateLimit} 也放行；</li>
-     *   <li>{@code limit = 0}：封禁 —— 该接口全部请求被拒绝；</li>
-     *   <li>{@code limit > 0}：正常限流（含给原本不限流的接口临时加限流）。</li>
-     * </ul>
-     *
-     * <p>存储缺失或无命中规则时直接返回，代码路径与 0.6.0 一致（一次判空 + 一次查找）。
-     */
-    private void applyDynamicRateRule(FilterContext context) {
-        if (rateRuleStore == null) {
-            return;
-        }
-        DynamicRateRule rule = rateRuleStore.findMatch(context.getApiKey()).orElse(null);
+        // 动态规则覆盖：规则须能给「原本不限流」的接口加限流，也能放开已限流接口
+        DynamicRateRule rule = policy.getDynamicRule();
         if (rule == null) {
             return;
         }

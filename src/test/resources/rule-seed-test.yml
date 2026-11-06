@@ -1,0 +1,11 @@
+# 0.8.0 启动种子规则测试数据
+rules:
+  - pattern: com.x.OrderController#create
+    limit: 100
+    window: 60
+    ttlSeconds: 300
+    operator: ops
+    reason: 大促临时收紧
+  - pattern: com.x.OrderController#read
+    limit: 0
+    ttlSeconds: 60

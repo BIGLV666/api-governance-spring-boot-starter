@@ -9,7 +9,7 @@
 | spring-boot-starter-aop | AOP + 核心容器 | 否 |
 | spring-web | @RestController 等 Web 注解 | 否 |
 | jakarta.servlet-api | 管理接口鉴权过滤器（provided，运行期由宿主容器提供） | 否（不传递） |
-| spring-boot-starter-actuator | Micrometer 指标桥接（可选，未引入时桥接 Bean 不装配，治理能力不受影响） | 是 |
+| spring-boot-starter-actuator | Micrometer 指标桥接 + 健康指示器 / Info 贡献器（0.8.0 起；可选，未引入时不装配，治理能力不受影响） | 是 |
 | micrometer-tracing-bridge-otel | OpenTelemetry bridge（0.4.0 起可选） | 是 |
 | opentelemetry-exporter-otlp | OTLP 链路上报（0.4.0 起可选） | 是 |
 | spring-kafka | Kafka 消息链路适配（宿主使用 Kafka 时激活） | 是 |

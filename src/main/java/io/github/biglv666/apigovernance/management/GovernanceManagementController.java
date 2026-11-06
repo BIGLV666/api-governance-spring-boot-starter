@@ -12,11 +12,17 @@ import io.github.biglv666.apigovernance.filter.PreFilter;
 import io.github.biglv666.apigovernance.metrics.ApiMetrics;
 import io.github.biglv666.apigovernance.metrics.MetricsRegistry;
 import io.github.biglv666.apigovernance.metrics.RequestRecord;
+import io.github.biglv666.apigovernance.ratelimit.RateLimitPolicy;
+import io.github.biglv666.apigovernance.ratelimit.RateLimitPolicyResolver;
 import io.github.biglv666.apigovernance.ratelimit.RateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.local.SlidingWindowRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.local.TokenBucketRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.rules.DynamicRateRule;
+import io.github.biglv666.apigovernance.ratelimit.rules.InMemoryRuleAuditLog;
 import io.github.biglv666.apigovernance.ratelimit.rules.RateRuleStore;
+import io.github.biglv666.apigovernance.ratelimit.rules.RuleAuditEntry;
+import io.github.biglv666.apigovernance.ratelimit.rules.RuleAuditLog;
+import io.github.biglv666.apigovernance.web.HttpRequestContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -28,11 +34,16 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.context.request.RequestAttributes;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadPoolExecutor;
 
@@ -48,9 +59,13 @@ import java.util.concurrent.ThreadPoolExecutor;
  *   <li>{@code GET  /rate-limiter/count?key=}：指定 key 当前计数</li>
  *   <li>{@code POST /rate-limiter/reset?key=}：重置指定 key</li>
  *   <li>{@code POST /rate-limiter/reset-all}：重置全部限流</li>
- *   <li>{@code GET  /rate-limiter/rules}：动态限流规则列表（0.7.0 新增）</li>
- *   <li>{@code PUT  /rate-limiter/rules}：新增/覆盖一条动态规则（0.7.0 新增，JSON body）</li>
+ *   <li>{@code GET  /rate-limiter/rules}：动态限流规则列表（0.7.0 新增，0.8.0 增加 TTL/元数据）</li>
+ *   <li>{@code PUT  /rate-limiter/rules}：新增/覆盖一条动态规则（0.7.0 新增，0.8.0 增加 TTL）</li>
  *   <li>{@code DELETE /rate-limiter/rules?pattern=}：删除一条动态规则（0.7.0 新增）</li>
+ *   <li>{@code GET  /rate-limiter/rules/effective?apiKey=}：解释最终生效规则与优先级（0.8.0 新增）</li>
+ *   <li>{@code GET  /rate-limiter/rules/audit?limit=}：规则变更审计（0.8.0 新增）</li>
+ *   <li>{@code GET  /rate-limiter/rules/export}：导出规则（0.8.0 新增）</li>
+ *   <li>{@code POST /rate-limiter/rules/import}：批量导入/替换（支持 dry-run，0.8.0 新增）</li>
  *   <li>{@code GET  /metrics}：全部 API 指标汇总</li>
  *   <li>{@code GET  /metrics/detail?key=}：单 API 指标明细（含最近记录）</li>
  *   <li>{@code GET  /metrics/slow?key=}：单 API 慢方法列表</li>
@@ -80,8 +95,11 @@ public class GovernanceManagementController {
     /** 动态限流规则存储（0.7.0 新增，可能为 null：动态规则关闭时）。 */
     private final RateRuleStore rateRuleStore;
 
+    /** 动态规则变更审计（0.8.0 新增，永不为 null；容量 0 时为空转实现）。 */
+    private final RuleAuditLog auditLog;
+
     /**
-     * 构造管理控制器（0.7.0 起主构造器，含动态规则存储）。
+     * 构造管理控制器（0.8.0 起主构造器，含动态规则审计）。
      *
      * @param properties            全局配置
      * @param rateLimiter           限流器（可能为 null）
@@ -90,6 +108,7 @@ public class GovernanceManagementController {
      * @param asyncHandlerRegistry  异步 Handler 注册表（可能为 null：异步插件关闭时）
      * @param asyncExecutorProvider 异步执行器（可能为 null：异步插件关闭时）
      * @param rateRuleStore         动态限流规则存储（可能为 null：动态规则关闭时）
+     * @param auditLog              规则变更审计（可能为 null：按空转处理）
      */
     public GovernanceManagementController(ApiGovernanceProperties properties,
                                           RateLimiter rateLimiter,
@@ -97,7 +116,8 @@ public class GovernanceManagementController {
                                           MetricsRegistry metricsRegistry,
                                           AsyncHandlerRegistry asyncHandlerRegistry,
                                           AsyncExecutorProvider asyncExecutorProvider,
-                                          RateRuleStore rateRuleStore) {
+                                          RateRuleStore rateRuleStore,
+                                          RuleAuditLog auditLog) {
         this.properties = properties;
         this.rateLimiter = rateLimiter;
         this.filterChain = filterChain;
@@ -105,12 +125,13 @@ public class GovernanceManagementController {
         this.asyncHandlerRegistry = asyncHandlerRegistry;
         this.asyncExecutorProvider = asyncExecutorProvider;
         this.rateRuleStore = rateRuleStore;
+        this.auditLog = auditLog == null ? new InMemoryRuleAuditLog(0) : auditLog;
     }
 
     /**
-     * 构造管理控制器（0.6.x 兼容重载）。
+     * 构造管理控制器（0.7.x 兼容重载）。
      *
-     * <p>动态规则端点按「未启用」处理。
+     * <p>规则变更审计按「关闭」处理。
      *
      * @param properties            全局配置
      * @param rateLimiter           限流器（可能为 null）
@@ -118,7 +139,33 @@ public class GovernanceManagementController {
      * @param metricsRegistry       指标注册表
      * @param asyncHandlerRegistry  异步 Handler 注册表（可能为 null）
      * @param asyncExecutorProvider 异步执行器（可能为 null）
-     * @deprecated 0.7.0 起新增动态规则端点，请改用七参构造器
+     * @param rateRuleStore         动态限流规则存储（可能为 null）
+     * @deprecated 0.8.0 起新增规则审计，请改用八参构造器
+     */
+    @Deprecated
+    public GovernanceManagementController(ApiGovernanceProperties properties,
+                                          RateLimiter rateLimiter,
+                                          FilterChain filterChain,
+                                          MetricsRegistry metricsRegistry,
+                                          AsyncHandlerRegistry asyncHandlerRegistry,
+                                          AsyncExecutorProvider asyncExecutorProvider,
+                                          RateRuleStore rateRuleStore) {
+        this(properties, rateLimiter, filterChain, metricsRegistry,
+                asyncHandlerRegistry, asyncExecutorProvider, rateRuleStore, null);
+    }
+
+    /**
+     * 构造管理控制器（0.6.x 兼容重载）。
+     *
+     * <p>动态规则端点与审计按「未启用」处理。
+     *
+     * @param properties            全局配置
+     * @param rateLimiter           限流器（可能为 null）
+     * @param filterChain           过滤器链
+     * @param metricsRegistry       指标注册表
+     * @param asyncHandlerRegistry  异步 Handler 注册表（可能为 null）
+     * @param asyncExecutorProvider 异步执行器（可能为 null）
+     * @deprecated 0.7.0 起新增动态规则端点，请改用七参/八参构造器
      */
     @Deprecated
     public GovernanceManagementController(ApiGovernanceProperties properties,
@@ -128,7 +175,7 @@ public class GovernanceManagementController {
                                           AsyncHandlerRegistry asyncHandlerRegistry,
                                           AsyncExecutorProvider asyncExecutorProvider) {
         this(properties, rateLimiter, filterChain, metricsRegistry,
-                asyncHandlerRegistry, asyncExecutorProvider, null);
+                asyncHandlerRegistry, asyncExecutorProvider, null, null);
     }
 
     /**
@@ -294,7 +341,9 @@ public class GovernanceManagementController {
     // ==================== 动态限流规则（0.7.0 新增） ====================
 
     /**
-     * 动态限流规则列表（pattern、limit、window、写入时间与存储类型）。
+     * 动态限流规则列表（pattern、limit、window、TTL、操作元数据与存储类型）。
+     *
+     * <p>只返回未过期规则；{@code ttlSecondsRemaining = -1} 表示永久有效。
      */
     @GetMapping("/rate-limiter/rules")
     public Map<String, Object> rateLimitRules() {
@@ -305,19 +354,257 @@ public class GovernanceManagementController {
                     + " (api.governance.rate-limit.dynamic-rules.enabled=false)");
             return body;
         }
+        long now = System.currentTimeMillis();
         List<Map<String, Object>> rules = new ArrayList<>();
-        for (DynamicRateRule rule : rateRuleStore.all().values()) {
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("pattern", rule.getPattern());
-            item.put("limit", rule.getLimit());
-            item.put("window", rule.getWindow());
-            item.put("updatedAt", rule.getUpdatedAtMs());
-            rules.add(item);
+        for (DynamicRateRule rule : rateRuleStore.activeRules(now).values()) {
+            rules.add(ruleToMap(rule, now));
         }
         body.put("success", true);
         body.put("store", rateRuleStore.getName());
         body.put("count", rules.size());
         body.put("rules", rules);
+        return body;
+    }
+
+    /**
+     * 解释指定 API 的最终生效限流策略与优先级来源（0.8.0 新增）。
+     *
+     * <p>返回注解 / 全局默认 / 动态规则各自的值，以及最终生效值与来源。
+     * 类或方法无法反查时仍返回全局默认 + 动态规则解释，并在 {@code message} 中说明。
+     */
+    @GetMapping("/rate-limiter/rules/effective")
+    public Map<String, Object> effectiveRateLimitRule(@RequestParam("apiKey") String apiKey) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        RateLimitPolicyResolver.ApiKeyResolution resolution =
+                RateLimitPolicyResolver.resolveForApiKey(apiKey, properties, rateRuleStore);
+        RateLimitPolicy policy = resolution.policy();
+
+        Map<String, Object> annotation = new LinkedHashMap<>();
+        annotation.put("limit", policy.getAnnotationLimit());
+        annotation.put("window", policy.getAnnotationWindow());
+        annotation.put("enabled", policy.isAnnotationEnabled());
+        annotation.put("source", policy.getAnnotationSource().getCode());
+
+        Map<String, Object> globalDefault = new LinkedHashMap<>();
+        globalDefault.put("limit", properties.getRateLimit().getDefaultLimit());
+        globalDefault.put("window", properties.getRateLimit().getDefaultWindow());
+
+        Map<String, Object> effective = new LinkedHashMap<>();
+        effective.put("limit", policy.getLimit());
+        effective.put("window", policy.getWindow());
+        effective.put("enabled", policy.isEnabled());
+        effective.put("source", policy.getSource().getCode());
+
+        body.put("success", true);
+        body.put("apiKey", apiKey);
+        body.put("classResolved", resolution.classResolved());
+        body.put("methodResolved", resolution.methodResolved());
+        body.put("ambiguous", resolution.ambiguous());
+        body.put("message", resolution.message());
+        body.put("annotation", annotation);
+        body.put("globalDefault", globalDefault);
+        body.put("dynamicRule", policy.getDynamicRule() == null
+                ? null : ruleToMap(policy.getDynamicRule(), System.currentTimeMillis()));
+        body.put("effective", effective);
+        body.put("keyExpression", policy.getKeyExpression());
+        body.put("store", rateRuleStore == null ? null : rateRuleStore.getName());
+        return body;
+    }
+
+    /**
+     * 规则变更审计（0.8.0 新增）：时间倒序，最新在前。
+     */
+    @GetMapping("/rate-limiter/rules/audit")
+    public Map<String, Object> rateLimitRuleAudit(
+            @RequestParam(value = "limit", defaultValue = "100") int limit) {
+        int effectiveLimit = Math.max(1, Math.min(limit, 1000));
+        List<Map<String, Object>> entries = new ArrayList<>();
+        for (RuleAuditEntry entry : auditLog.recent(effectiveLimit)) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("timestamp", entry.timestampMs());
+            item.put("action", entry.action().name());
+            item.put("pattern", entry.pattern());
+            item.put("beforeLimit", entry.beforeLimit());
+            item.put("beforeWindow", entry.beforeWindow());
+            item.put("afterLimit", entry.afterLimit());
+            item.put("afterWindow", entry.afterWindow());
+            item.put("expiresAt", entry.expiresAtMs());
+            item.put("operator", entry.operator());
+            item.put("clientIp", entry.clientIp());
+            item.put("success", entry.success());
+            item.put("message", entry.message());
+            entries.add(item);
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("success", true);
+        body.put("log", auditLog.getName());
+        body.put("capacity", auditLog.getCapacity());
+        body.put("count", entries.size());
+        body.put("entries", entries);
+        return body;
+    }
+
+    /**
+     * 导出全部未过期规则（0.8.0 新增）：可保存为种子文件或用于灾备恢复。
+     */
+    @GetMapping("/rate-limiter/rules/export")
+    public Map<String, Object> exportRateLimitRules() {
+        Map<String, Object> body = new LinkedHashMap<>();
+        if (rateRuleStore == null) {
+            body.put("success", false);
+            body.put("message", "动态规则未启用"
+                    + " (api.governance.rate-limit.dynamic-rules.enabled=false)");
+            return body;
+        }
+        long now = System.currentTimeMillis();
+        List<Map<String, Object>> rules = new ArrayList<>();
+        for (DynamicRateRule rule : rateRuleStore.activeRules(now).values()) {
+            rules.add(ruleToMap(rule, now));
+        }
+        body.put("success", true);
+        body.put("format", "api-governance-rules-v1");
+        body.put("store", rateRuleStore.getName());
+        body.put("exportedAt", now);
+        body.put("count", rules.size());
+        body.put("rules", rules);
+        return body;
+    }
+
+    /**
+     * 批量导入规则（0.8.0 新增）。
+     *
+     * <p>请求体：{@code {"rules": [...], "mode": "merge|replace", "dryRun": true}}。
+     * 先整体校验（任一规则非法则全部不写），{@code dryRun=true} 时只返回将要变更的计数。
+     */
+    @PostMapping("/rate-limiter/rules/import")
+    public Map<String, Object> importRateLimitRules(
+            @RequestBody(required = false) Map<String, Object> requestBody) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        if (isMutationsDisabled()) {
+            return mutationsDisabledBody();
+        }
+        if (rateRuleStore == null) {
+            body.put("success", false);
+            body.put("message", "动态规则未启用"
+                    + " (api.governance.rate-limit.dynamic-rules.enabled=false)");
+            return body;
+        }
+        if (requestBody == null || !(requestBody.get("rules") instanceof List<?> rawRules)) {
+            body.put("success", false);
+            body.put("message", "缺少必填字段 rules（规则数组）");
+            return body;
+        }
+        String mode = parseStringField(requestBody.get("mode"));
+        mode = mode == null ? "merge" : mode.toLowerCase();
+        if (!"merge".equals(mode) && !"replace".equals(mode)) {
+            body.put("success", false);
+            body.put("message", "mode 仅支持 merge 或 replace，收到: " + mode);
+            return body;
+        }
+        boolean dryRun = parseBooleanField(requestBody.get("dryRun"));
+
+        List<DynamicRateRule> incoming = new ArrayList<>();
+        List<Map<String, Object>> errors = new ArrayList<>();
+        int index = 0;
+        for (Object item : rawRules) {
+            try {
+                if (!(item instanceof Map<?, ?> map)) {
+                    throw new IllegalArgumentException("规则必须是 JSON 对象");
+                }
+                incoming.add(parseRule(map));
+            } catch (RuntimeException e) {
+                Map<String, Object> error = new LinkedHashMap<>();
+                error.put("index", index);
+                error.put("message", e.getMessage());
+                errors.add(error);
+            }
+            index++;
+        }
+        if (!errors.isEmpty()) {
+            body.put("success", false);
+            body.put("message", "存在 " + errors.size() + " 条非法规则，未写入任何规则");
+            body.put("errors", errors);
+            return body;
+        }
+
+        Map<String, DynamicRateRule> unique = new LinkedHashMap<>();
+        for (DynamicRateRule rule : incoming) {
+            unique.put(rule.getPattern(), rule);
+        }
+        long now = System.currentTimeMillis();
+        Map<String, DynamicRateRule> existing = rateRuleStore.activeRules(now);
+        int maxRules = properties.getRateLimit().getDynamicRules().getMaxRules();
+        Set<String> targetPatterns = "replace".equals(mode)
+                ? new LinkedHashSet<>(unique.keySet())
+                : new LinkedHashSet<>(existing.keySet());
+        targetPatterns.addAll(unique.keySet());
+        if (targetPatterns.size() > maxRules) {
+            body.put("success", false);
+            body.put("message", "导入后将达到 " + targetPatterns.size()
+                    + " 条规则，超过上限 " + maxRules);
+            return body;
+        }
+
+        int created = 0;
+        int updated = 0;
+        for (String pattern : unique.keySet()) {
+            if (existing.containsKey(pattern)) {
+                updated++;
+            } else {
+                created++;
+            }
+        }
+        int deleted = 0;
+        if ("replace".equals(mode)) {
+            for (String pattern : existing.keySet()) {
+                if (!unique.containsKey(pattern)) {
+                    deleted++;
+                }
+            }
+        }
+
+        body.put("success", true);
+        body.put("dryRun", dryRun);
+        body.put("mode", mode);
+        body.put("total", unique.size());
+        body.put("created", created);
+        body.put("updated", updated);
+        body.put("deleted", deleted);
+        if (dryRun) {
+            body.put("message", "dry-run 通过，未写入任何规则");
+            return body;
+        }
+
+        RuleAuditEntry.Action action = "replace".equals(mode)
+                ? RuleAuditEntry.Action.REPLACE : RuleAuditEntry.Action.IMPORT;
+        try {
+            if ("replace".equals(mode)) {
+                rateRuleStore.replaceAll(unique.values());
+                for (String pattern : existing.keySet()) {
+                    if (!unique.containsKey(pattern)) {
+                        recordAudit(action, pattern, existing.get(pattern), null,
+                                currentOperator(), true, "removed by import replace");
+                    }
+                }
+            } else {
+                rateRuleStore.putAll(unique.values());
+            }
+        } catch (RuntimeException e) {
+            for (DynamicRateRule rule : unique.values()) {
+                recordAudit(action, rule.getPattern(), existing.get(rule.getPattern()), rule,
+                        currentOperator(), false, e.getMessage());
+            }
+            body.put("success", false);
+            body.put("message", "导入失败: " + e.getMessage());
+            return body;
+        }
+        for (DynamicRateRule rule : unique.values()) {
+            recordAudit(action, rule.getPattern(), existing.get(rule.getPattern()), rule,
+                    currentOperator(), true, "import applied");
+        }
+        body.put("message", "规则导入成功");
+        log.warn("批量导入动态限流规则 - mode: {}, total: {}, created: {}, updated: {}, deleted: {}, store: {}",
+                mode, unique.size(), created, updated, deleted, rateRuleStore.getName());
         return body;
     }
 
@@ -358,20 +645,55 @@ public class GovernanceManagementController {
         if (window == null) {
             window = properties.getRateLimit().getDefaultWindow();
         }
+        Long rawTtlSeconds = parseLongField(requestBody.get("ttlSeconds"));
+        if (rawTtlSeconds != null && rawTtlSeconds < 0) {
+            body.put("success", false);
+            body.put("message", "ttlSeconds 不能为负数（0 或缺省表示永久有效）");
+            return body;
+        }
+        long ttlSeconds = rawTtlSeconds != null
+                ? rawTtlSeconds
+                : properties.getRateLimit().getDynamicRules().getDefaultTtlSeconds();
+        String operator = firstNonBlank(parseStringField(requestBody.get("operator")),
+                currentOperator());
+        String reason = parseStringField(requestBody.get("reason"));
+
+        DynamicRateRule rule;
         try {
-            rateRuleStore.put(pattern, limit, window);
-        } catch (IllegalArgumentException | IllegalStateException e) {
+            rule = DynamicRateRule.of(pattern, limit, window, ttlSeconds, operator, reason);
+        } catch (IllegalArgumentException e) {
+            recordAudit(RuleAuditEntry.Action.PUT, pattern, null, null, operator,
+                    false, e.getMessage());
             body.put("success", false);
             body.put("message", e.getMessage());
             return body;
         }
+        DynamicRateRule before = rateRuleStore.activeRules(System.currentTimeMillis())
+                .get(rule.getPattern());
+        try {
+            rateRuleStore.put(rule);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            recordAudit(RuleAuditEntry.Action.PUT, pattern, before, rule, operator,
+                    false, e.getMessage());
+            body.put("success", false);
+            body.put("message", e.getMessage());
+            return body;
+        }
+        recordAudit(RuleAuditEntry.Action.PUT, rule.getPattern(), before, rule, operator,
+                true, "rule applied");
         body.put("success", true);
         body.put("message", "规则已生效");
-        body.put("pattern", pattern);
-        body.put("limit", limit);
-        body.put("window", window);
-        log.warn("提交动态限流规则 - pattern: {}, limit: {}, window: {}s, store: {}",
-                pattern, limit, window, rateRuleStore.getName());
+        body.put("pattern", rule.getPattern());
+        body.put("limit", rule.getLimit());
+        body.put("window", rule.getWindow());
+        body.put("expiresAt", rule.getExpiresAtMs());
+        body.put("ttlSecondsRemaining", rule.getTtlSecondsRemaining(System.currentTimeMillis()));
+        body.put("operator", rule.getOperator());
+        body.put("reason", rule.getReason());
+        body.put("store", rateRuleStore.getName());
+        log.warn("提交动态限流规则 - pattern: {}, limit: {}, window: {}s, ttl: {}s, operator: {}, store: {}",
+                rule.getPattern(), rule.getLimit(), rule.getWindow(), ttlSeconds,
+                rule.getOperator(), rateRuleStore.getName());
         return body;
     }
 
@@ -390,18 +712,154 @@ public class GovernanceManagementController {
                     + " (api.governance.rate-limit.dynamic-rules.enabled=false)");
             return body;
         }
+        String operator = currentOperator();
+        DynamicRateRule before = rateRuleStore.activeRules(System.currentTimeMillis()).get(pattern);
         try {
             rateRuleStore.remove(pattern);
         } catch (IllegalStateException e) {
+            recordAudit(RuleAuditEntry.Action.DELETE, pattern, before, null, operator,
+                    false, e.getMessage());
             body.put("success", false);
             body.put("message", e.getMessage());
             return body;
         }
+        recordAudit(RuleAuditEntry.Action.DELETE, pattern, before, null, operator,
+                true, "rule deleted");
         body.put("success", true);
         body.put("message", "规则已删除");
         body.put("pattern", pattern);
         log.warn("删除动态限流规则 - pattern: {}, store: {}", pattern, rateRuleStore.getName());
         return body;
+    }
+
+    /**
+     * 把一条规则 Map 转为完整的 {@link DynamicRateRule}（导入接口使用）。
+     */
+    private DynamicRateRule parseRule(Map<?, ?> item) {
+        String pattern = parseStringField(item.get("pattern"));
+        Integer limit = parseIntField(item.get("limit"));
+        if (limit == null) {
+            throw new IllegalArgumentException(
+                    "缺少或非法字段 limit（-1=不限流 / 0=封禁 / >0=窗口内上限）");
+        }
+        Integer window = parseIntField(item.get("window"));
+        if (window == null) {
+            window = properties.getRateLimit().getDefaultWindow();
+        }
+        Long ttlSeconds = parseLongField(item.get("ttlSeconds"));
+        if (ttlSeconds != null && ttlSeconds < 0) {
+            throw new IllegalArgumentException("ttlSeconds 不能为负数");
+        }
+        long effectiveTtl = ttlSeconds != null
+                ? ttlSeconds
+                : properties.getRateLimit().getDynamicRules().getDefaultTtlSeconds();
+        String operator = firstNonBlank(parseStringField(item.get("operator")), "import");
+        String reason = parseStringField(item.get("reason"));
+        return DynamicRateRule.of(pattern, limit, window, effectiveTtl, operator, reason);
+    }
+
+    /**
+     * 规则转管理接口输出 Map（TTL 剩余秒数 -1 表示永久）。
+     */
+    private Map<String, Object> ruleToMap(DynamicRateRule rule, long nowMs) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("pattern", rule.getPattern());
+        item.put("limit", rule.getLimit());
+        item.put("window", rule.getWindow());
+        item.put("updatedAt", rule.getUpdatedAtMs());
+        item.put("expiresAt", rule.getExpiresAtMs());
+        item.put("ttlSecondsRemaining", rule.getTtlSecondsRemaining(nowMs));
+        item.put("operator", rule.getOperator());
+        item.put("reason", rule.getReason());
+        return item;
+    }
+
+    /**
+     * 记录审计（best-effort：审计实现异常绝不影响规则变更结果）。
+     */
+    private void recordAudit(RuleAuditEntry.Action action, String pattern,
+                             DynamicRateRule before, DynamicRateRule after,
+                             String operator, boolean success, String message) {
+        try {
+            auditLog.record(new RuleAuditEntry(System.currentTimeMillis(), action, pattern,
+                    before == null ? null : before.getLimit(),
+                    before == null ? null : before.getWindow(),
+                    after == null ? null : after.getLimit(),
+                    after == null ? null : after.getWindow(),
+                    after == null ? 0L : after.getExpiresAtMs(),
+                    operator, currentClientIp(), success, message));
+        } catch (RuntimeException e) {
+            log.warn("记录规则审计失败（不影响规则变更）: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 当前操作人：{@code X-Governance-Operator} 请求头，缺省 {@code anonymous}。
+     */
+    private String currentOperator() {
+        try {
+            RequestAttributes attrs = RequestContextHolder.getRequestAttributes();
+            if (attrs instanceof ServletRequestAttributes servletAttributes) {
+                String header = servletAttributes.getRequest()
+                        .getHeader("X-Governance-Operator");
+                if (header != null && !header.isBlank()) {
+                    return header.trim();
+                }
+            }
+        } catch (Throwable ignored) {
+            // 非 Servlet 环境（单元测试直调）：使用 anonymous
+        }
+        return "anonymous";
+    }
+
+    /**
+     * 当前请求来源 IP；非 HTTP 调用返回空串。
+     */
+    private String currentClientIp() {
+        try {
+            RequestAttributes attrs = RequestContextHolder.getRequestAttributes();
+            if (attrs instanceof ServletRequestAttributes servletAttributes) {
+                String ip = HttpRequestContext.resolveClientIp(servletAttributes.getRequest());
+                return ip == null ? "" : ip;
+            }
+        } catch (Throwable ignored) {
+            // 非 Servlet 环境：不记录来源 IP
+        }
+        return "";
+    }
+
+    private static String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value.trim();
+            }
+        }
+        return "";
+    }
+
+    private static Long parseLongField(Object value) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        if (value instanceof String s && !s.isBlank()) {
+            try {
+                return Long.valueOf(s.trim());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static String parseStringField(Object value) {
+        return value instanceof String s ? s.trim() : null;
+    }
+
+    private static boolean parseBooleanField(Object value) {
+        if (value instanceof Boolean b) {
+            return b;
+        }
+        return value instanceof String s && Boolean.parseBoolean(s.trim());
     }
 
     /**
