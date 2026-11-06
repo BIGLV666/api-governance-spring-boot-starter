@@ -4,6 +4,33 @@
 
 ## 版本升级
 
+### 从 0.7.0 升级到 0.8.0
+
+全部为增量特性，现有行为不变（默认值均已保持 0.7.0 语义）：
+
+1. **新增 Actuator 健康/Info Bean（默认开启）**：类路径存在 actuator 时注册
+   `apiGovernance` 健康指示器与 Info 贡献器。默认 `fail-strategy=open` 下故障仍返回 UP，
+   不会改变现有探针结果；如不需要可设 `management.health-enabled=false`；
+2. **规则审计默认开启**：内存环形缓冲 `dynamic-rules.audit-capacity=1000`，
+   只记录规则变更（PUT/DELETE/IMPORT/REPLACE/SEED），容量到顶淘汰最旧条目；
+   设为 0 即完全关闭；
+3. **动态规则存储接口新增默认方法**：自定义 `RateRuleStore` 实现无需改动即可编译运行，
+   但若需 TTL / 操作元数据 / 批量写入语义，请覆盖新的 `put(DynamicRateRule)` /
+   `putAll` / `replaceAll` / `activeRules`（默认实现会退化为 0.7.0 三参写入）；
+   Redis 存储格式向后兼容旧的三字段值，滚动升级期间新旧实例可共存；
+4. **`GovernanceManagementController` 新增八参构造器**：七参/六参/四参构造器仍可用，
+   已标注 `@Deprecated`（审计按关闭处理）。
+
+增量项：规则 TTL 与操作元数据（`ttlSeconds` / `operator` / `reason`，规则列表返回
+`expiresAt` 与 `ttlSecondsRemaining`）；`GET /rate-limiter/rules/effective` 解释端点；
+`GET /rate-limiter/rules/audit` 审计端点；`GET /rate-limiter/rules/export` 与
+`POST /rate-limiter/rules/import`（含 `dryRun`）；启动种子规则
+`dynamic-rules.seed-location`（`seed-fail-fast` 默认 true）。
+
+> **滚动升级提示**：Redis 规则值向后兼容（0.8.0 可读 0.7.0 的三字段值；0.7.0 读取
+> 0.8.0 的六字段值会忽略末尾 TTL/元数据）。因此滚动升级期间 0.7.0 实例**不会执行 TTL
+> 过期**、也不展示操作元数据；如需严格的 TTL 语义，请先升级全部实例再提交带 TTL 的规则。
+
 ### 从 0.6.0 升级到 0.7.0
 
 全部为增量特性，默认行为需留意三点：

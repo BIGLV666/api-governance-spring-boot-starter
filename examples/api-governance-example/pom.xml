@@ -7,13 +7,13 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.2.0</version>
+        <version>3.5.16</version>
         <relativePath/>
     </parent>
 
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-example</artifactId>
-    <version>0.6.0</version>
+    <version>0.8.0</version>
     <name>api-governance-example</name>
     <description>api-governance-spring-boot-starter 最小可运行示例（独立工程，不参与主仓库构建）</description>
 
@@ -25,7 +25,7 @@
         <dependency>
             <groupId>io.github.biglv666</groupId>
             <artifactId>api-governance-spring-boot-starter</artifactId>
-            <version>0.6.0</version>
+            <version>0.8.0</version>
         </dependency>
         <!-- /actuator/prometheus 指标暴露 -->
         <dependency>

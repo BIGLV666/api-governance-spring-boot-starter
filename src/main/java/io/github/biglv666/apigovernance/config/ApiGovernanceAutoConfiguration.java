@@ -30,6 +30,8 @@ import io.github.biglv666.apigovernance.filter.impl.MetadataCollectorFilter;
 import io.github.biglv666.apigovernance.filter.impl.RateLimitFilter;
 import io.github.biglv666.apigovernance.filter.impl.SlowMethodFilter;
 import io.github.biglv666.apigovernance.filter.impl.TrafficStatisticsFilter;
+import io.github.biglv666.apigovernance.health.ApiGovernanceHealthIndicator;
+import io.github.biglv666.apigovernance.health.ApiGovernanceInfoContributor;
 import io.github.biglv666.apigovernance.management.GovernanceManagementAuthFilter;
 import io.github.biglv666.apigovernance.management.GovernanceManagementController;
 import io.github.biglv666.apigovernance.metrics.MetricsEventListener;
@@ -49,8 +51,11 @@ import io.github.biglv666.apigovernance.ratelimit.local.TokenBucketRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.redis.RedisSlidingWindowRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.redis.RedisTokenBucketRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.rules.InMemoryRateRuleStore;
+import io.github.biglv666.apigovernance.ratelimit.rules.InMemoryRuleAuditLog;
 import io.github.biglv666.apigovernance.ratelimit.rules.RateRuleStore;
 import io.github.biglv666.apigovernance.ratelimit.rules.RedisRateRuleStore;
+import io.github.biglv666.apigovernance.ratelimit.rules.RuleAuditLog;
+import io.github.biglv666.apigovernance.ratelimit.rules.RuleSeedLoader;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
@@ -67,6 +72,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.EnableAspectJAutoProxy;
 import org.springframework.core.Ordered;
+import org.springframework.core.io.ResourceLoader;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.util.List;
@@ -285,6 +291,58 @@ public class ApiGovernanceAutoConfiguration {
                     dynamicRules.getRefreshIntervalMs());
             return new RedisRateRuleStore(redisTemplate, dynamicRules.getRefreshIntervalMs(),
                     dynamicRules.getMaxRules());
+        }
+
+        /**
+         * 规则变更审计日志（0.8.0 新增）：进程内有界环形缓冲，容量可配（0 = 关闭）。
+         * 注册自定义 {@link RuleAuditLog} Bean 可替换为持久化 / 跨实例实现。
+         */
+        @Bean
+        @ConditionalOnMissingBean
+        public RuleAuditLog ruleAuditLog(ApiGovernanceProperties properties) {
+            int capacity = properties.getRateLimit().getDynamicRules().getAuditCapacity();
+            log.info("配置动态规则审计日志: capacity={}", capacity);
+            return new InMemoryRuleAuditLog(capacity);
+        }
+
+        /**
+         * 启动种子规则加载器（0.8.0 新增）：所有单例就绪后读取
+         * {@code dynamic-rules.seed-location} 并写入存储。
+         */
+        @Bean
+        public SmartInitializingSingleton rateRuleSeedLoader(
+                ApiGovernanceProperties properties,
+                ObjectProvider<RateRuleStore> storeProvider,
+                ObjectProvider<RuleAuditLog> auditLogProvider,
+                ResourceLoader resourceLoader) {
+            return () -> {
+                ApiGovernanceProperties.RateLimit.DynamicRules config =
+                        properties.getRateLimit().getDynamicRules();
+                String location = config.getSeedLocation();
+                if (location == null || location.isBlank()) {
+                    return;
+                }
+                RateRuleStore store = storeProvider.getIfAvailable();
+                if (store == null) {
+                    log.warn("已配置动态规则种子文件，但规则存储未启用，跳过加载: {}", location);
+                    return;
+                }
+                try {
+                    var seeds = RuleSeedLoader.load(location.trim(), resourceLoader);
+                    int applied = RuleSeedLoader.apply(seeds,
+                            properties.getRateLimit().getDefaultWindow(),
+                            config.getDefaultTtlSeconds(), store,
+                            auditLogProvider.getIfAvailable(), config.isSeedFailFast());
+                    log.info("动态规则种子加载完成 - location: {}, 文件规则数: {}, 成功: {}",
+                            location, seeds.size(), applied);
+                } catch (RuntimeException e) {
+                    if (config.isSeedFailFast()) {
+                        throw e;
+                    }
+                    log.warn("动态规则种子加载失败（seed-fail-fast=false，继续启动）: {}",
+                            e.getMessage());
+                }
+            };
         }
     }
 
@@ -516,10 +574,12 @@ public class ApiGovernanceAutoConfiguration {
             MetricsRegistry metricsRegistry,
             ObjectProvider<AsyncHandlerRegistry> asyncHandlerRegistry,
             ObjectProvider<AsyncExecutorProvider> asyncExecutorProvider,
-            ObjectProvider<RateRuleStore> rateRuleStore) {
+            ObjectProvider<RateRuleStore> rateRuleStore,
+            ObjectProvider<RuleAuditLog> ruleAuditLog) {
         return new GovernanceManagementController(properties, rateLimiter.getIfAvailable(),
                 filterChain, metricsRegistry, asyncHandlerRegistry.getIfAvailable(),
-                asyncExecutorProvider.getIfAvailable(), rateRuleStore.getIfAvailable());
+                asyncExecutorProvider.getIfAvailable(), rateRuleStore.getIfAvailable(),
+                ruleAuditLog.getIfAvailable());
     }
 
     /**
@@ -608,5 +668,40 @@ public class ApiGovernanceAutoConfiguration {
          * Redis 版动态规则存储已迁移至 {@link DynamicRateRulesConfiguration}
          * （类级 dynamic-rules.enabled 开关统一管理，0.7.0）。
          */
+    }
+
+    // ==================== Actuator 健康检查 / Info（0.8.0 新增，可选依赖） ====================
+
+    /**
+     * Actuator 集成：类路径存在 actuator 时注册 {@code apiGovernance} 健康指示器与
+     * info 贡献器。未引入 actuator 的宿主完全不装配，治理核心能力不受影响。
+     *
+     * <p>用 {@code @ConditionalOnClass(name = ...)} 字符串形式，避免 actuator 缺失时
+     * 加载本配置类即触发类加载错误。
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = "org.springframework.boot.actuate.health.HealthIndicator")
+    @ConditionalOnProperty(prefix = "api.governance.management", name = "health-enabled",
+            havingValue = "true", matchIfMissing = true)
+    static class GovernanceActuatorConfiguration {
+
+        @Bean
+        @ConditionalOnMissingBean
+        public ApiGovernanceHealthIndicator apiGovernanceHealthIndicator(
+                ApiGovernanceProperties properties,
+                ObjectProvider<RateLimiter> rateLimiter,
+                ObjectProvider<RateRuleStore> rateRuleStore,
+                ObjectProvider<AsyncExecutorProvider> asyncExecutorProvider) {
+            log.info("启用 API 治理 Actuator 健康指示器");
+            return new ApiGovernanceHealthIndicator(properties, rateLimiter.getIfAvailable(),
+                    rateRuleStore.getIfAvailable(), asyncExecutorProvider.getIfAvailable());
+        }
+
+        @Bean
+        @ConditionalOnMissingBean
+        public ApiGovernanceInfoContributor apiGovernanceInfoContributor(
+                ApiGovernanceProperties properties) {
+            return new ApiGovernanceInfoContributor(properties);
+        }
     }
 }

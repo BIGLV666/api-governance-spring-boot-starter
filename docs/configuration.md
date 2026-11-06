@@ -28,6 +28,10 @@ api:
         enabled: true                 # 总开关（默认开，无规则时零行为变化）
         refresh-interval-ms: 5000     # Redis 模式版本轮询间隔（集群传播延迟上界）
         max-rules: 1000               # 规则数上限（防止误操作灌爆存储）
+        default-ttl-seconds: 0        # 0.8.0 新增：规则缺省有效期（0=永久；临时变更建议设正数）
+        audit-capacity: 1000          # 0.8.0 新增：内存审计环形缓冲容量（0=关闭审计）
+        seed-location: ""             # 0.8.0 新增：启动种子规则 YAML（classpath:/file:，空=不加载）
+        seed-fail-fast: true          # 0.8.0 新增：种子规则非法时启动失败（false=跳过并 warn）
     filters:                          # 内置过滤器开关（0.3.0 新增），也可注册同类型 Bean 覆盖
       metadata-collector: true
       traffic-statistics: true
@@ -57,6 +61,8 @@ api:
       mutations-enabled: true         # 写操作开关（0.4.0 新增，false 时 reset/delete 端点返回失败）
       auth-token: ""                  # 非空时启用管理接口鉴权（建议 ${GOVERNANCE_TOKEN} 注入）
       auth-header: X-Governance-Token # 鉴权令牌请求头名称
+      health-enabled: true            # 0.8.0 新增：类路径存在 actuator 时注册 /actuator/health 指示器
+      health-stale-multiplier: 3      # 0.8.0 新增：规则存储陈旧阈值 = refresh-interval-ms × 本值
     async:
       enabled: true                   # 异步方法生命周期插件开关
       core-pool-size: 2               # 独立线程池核心线程数

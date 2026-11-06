@@ -54,6 +54,12 @@ strategies, admin endpoints — with **no heavy external dependencies**.
   arbitration; fail-open falls back to per-instance delivery when Redis is down.
 - ✅ **Boot 3.3–3.5 compatibility matrix** (new in 0.7.0) — baseline Spring Boot 3.5; CI runs the full
   suite against 3.3/3.4/3.5 × JDK 17/21.
+- ✅ **Full rule lifecycle** (new in 0.8.0) — rule TTL with lazy expiry (temporary bans and tightening
+  lift themselves), operator/reason metadata, an effective-rule explain endpoint, change audit, and
+  import/export plus startup seed files (rules as code).
+- ✅ **Actuator health & info** (new in 0.8.0) — `/actuator/health` reports limiter failures, stale
+  rule stores and async-pool saturation; UP/DOWN follows `fail-strategy` so a brief Redis outage does
+  not restart pods. `/actuator/info` shows the configuration actually in effect.
 
 ---
 
@@ -65,7 +71,7 @@ strategies, admin endpoints — with **no heavy external dependencies**.
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.7.0</version>
+    <version>0.8.0</version>
 </dependency>
 ```
 
@@ -138,6 +144,10 @@ api:
         enabled: true                 # master switch (no rules = zero behavior change)
         refresh-interval-ms: 5000     # redis mode version poll interval (cluster propagation bound)
         max-rules: 1000               # rule count cap
+        default-ttl-seconds: 0        # new in 0.8.0: default rule TTL (0 = permanent)
+        audit-capacity: 1000          # new in 0.8.0: in-memory audit ring buffer (0 = disabled)
+        seed-location: ""             # new in 0.8.0: startup seed YAML (classpath:/file:)
+        seed-fail-fast: true          # new in 0.8.0: invalid seed fails startup (false = skip + warn)
     filters:                          # built-in filter switches (new in 0.3.0); same-type beans also override
       metadata-collector: true
       traffic-statistics: true
@@ -166,6 +176,8 @@ api:
       mutations-enabled: true         # write-endpoint switch (new in 0.4.0; false disables reset/delete)
       auth-token: ""                  # non-empty enables token auth for admin endpoints
       auth-header: X-Governance-Token
+      health-enabled: true            # new in 0.8.0: register /actuator/health indicator when actuator is present
+      health-stale-multiplier: 3      # new in 0.8.0: stale threshold = refresh-interval-ms × this value
     async:
       enabled: true
       core-pool-size: 2
@@ -307,6 +319,45 @@ api:
 
 Either way the failure is logged (error) and a `RATE_LIMITER_FAILURE` alert is published if a notifier
 is configured. `fail-close` rejections return 503, distinct from regular 429 rate-limit rejections.
+
+### 8) Dynamic rules, TTL and audit (new in 0.8.0)
+
+Rules submitted through `PUT /rate-limiter/rules` accept an optional `ttlSeconds`; once expired the
+rule stops matching on the request hot path (lazy expiry, no background thread) — a temporary ban or
+tightening lifts itself. `operator` (header `X-Governance-Operator` or a JSON field) and `reason` are
+stored alongside the rule and returned by the list/export endpoints:
+
+```bash
+curl -X PUT http://host:8080/api-governance/rate-limiter/rules \
+  -H "Content-Type: application/json" -H "X-Governance-Operator: alice" \
+  -d '{"pattern": "com.x.OrderController#create", "limit": 10,
+       "ttlSeconds": 300, "reason": "incident mitigation"}'
+```
+
+- `GET /rate-limiter/rules/effective?apiKey=` shows the annotation/global/dynamic values, the final
+  effective value and its source (`dynamic-rule` / `method-annotation` / `class-annotation` /
+  `global-default` / `none`). The aspect and this endpoint share `RateLimitPolicyResolver`, so the
+  explanation cannot drift from execution.
+- `GET /rate-limiter/rules/audit` returns rule changes (PUT/DELETE/IMPORT/REPLACE/SEED) with
+  before/after values, operator, client IP and result. Backed by a bounded in-memory ring buffer
+  (`audit-capacity`, default 1000; 0 disables it).
+- `GET /rate-limiter/rules/export` and `POST /rate-limiter/rules/import` (`mode=merge|replace`,
+  `dryRun=true` supported) move rule sets between environments. Import validates the whole batch
+  first — one invalid rule means nothing is written.
+- `dynamic-rules.seed-location` loads a YAML rule file at startup (after all singletons are ready),
+  for rules-as-code and disaster recovery. `seed-fail-fast` (default true) fails startup on an invalid
+  file/rule; set it to false to skip and warn.
+
+```yaml
+# governance-rules.yml
+rules:
+  - pattern: com.x.OrderController#create
+    limit: 100
+    window: 60
+    ttlSeconds: 300
+    operator: ops
+    reason: campaign tightening
+```
 
 ---
 
@@ -483,9 +534,13 @@ Base path defaults to `/api-governance` (configurable):
 | GET | `/rate-limiter/count?key=` | current count for a key |
 | POST | `/rate-limiter/reset?key=` | reset a key |
 | POST | `/rate-limiter/reset-all` | reset all |
-| GET | `/rate-limiter/rules` | dynamic rate-limit rules list (new in 0.7.0) |
-| PUT | `/rate-limiter/rules` | upsert one dynamic rule, effective immediately (new in 0.7.0, JSON body) |
+| GET | `/rate-limiter/rules` | dynamic rate-limit rules list (new in 0.7.0; TTL/metadata since 0.8.0) |
+| PUT | `/rate-limiter/rules` | upsert one dynamic rule, effective immediately (new in 0.7.0; `ttlSeconds`/`operator`/`reason` since 0.8.0) |
 | DELETE | `/rate-limiter/rules?pattern=` | delete one dynamic rule (idempotent, new in 0.7.0) |
+| GET | `/rate-limiter/rules/effective?apiKey=` | explain the effective policy and its source (new in 0.8.0) |
+| GET | `/rate-limiter/rules/audit?limit=` | rule change audit, newest first (new in 0.8.0) |
+| GET | `/rate-limiter/rules/export` | export all unexpired rules (new in 0.8.0) |
+| POST | `/rate-limiter/rules/import` | bulk import/replace with `dryRun` (new in 0.8.0) |
 | GET | `/metrics` | all API metrics summary (supports `page`/`size` since 0.4.0) |
 | GET | `/async/handlers` | registered async handler list (new in 0.5.0) |
 | GET | `/async/status` | async thread-pool status (new in 0.5.0) |
@@ -567,7 +622,7 @@ and `correlationId` independently — do not use `traceId` for consumer idempote
 | spring-boot-starter-aop | AOP + core container | No |
 | spring-web | @RestController annotations | No |
 | jakarta.servlet-api | admin auth filter (provided; supplied by host container at runtime) | No (not transitive) |
-| spring-boot-starter-actuator | Observation, tracing, Micrometer metrics | No |
+| spring-boot-starter-actuator | Observation, tracing, Micrometer metrics, health/info (since 0.8.0) | Yes |
 | micrometer-tracing-bridge-otel | OpenTelemetry bridge (optional since 0.4.0) | Yes |
 | opentelemetry-exporter-otlp | OTLP trace export (optional since 0.4.0) | Yes |
 | spring-kafka | Kafka tracing adapter | Yes |
@@ -581,6 +636,25 @@ and `correlationId` independently — do not use `traceId` for consumer idempote
 ---
 
 ## 13. Version Upgrades
+
+### Upgrading from 0.7.0 to 0.8.0
+
+All changes are additive and defaults preserve 0.7.0 behaviour:
+
+1. **Actuator health/info beans are registered by default** when actuator is on the classpath. With
+   the default `fail-strategy=open`, failures still report UP, so existing probes are unaffected.
+   Set `api.governance.management.health-enabled=false` to opt out;
+2. **Rule audit is on by default** (`dynamic-rules.audit-capacity=1000`, bounded ring buffer);
+   set it to 0 to disable;
+3. **`RateRuleStore` gained default methods**: existing custom implementations compile and run
+   unchanged, but they lose TTL/metadata unless they override `put(DynamicRateRule)` / `putAll` /
+   `replaceAll`. The Redis format stays backward compatible (0.8.0 reads 0.7.0's three-field values;
+   0.7.0 ignores the new trailing fields, so it does not apply TTL during a rolling upgrade);
+4. **New eight-argument `GovernanceManagementController` constructor**: the 7/6/4-argument variants
+   remain available and are deprecated (audit treated as disabled).
+
+Additive items: rule TTL and operator/reason metadata; effective-rule explain endpoint; audit
+endpoint; export/import (with `dryRun`); startup seed rules (`seed-location`, `seed-fail-fast`).
 
 ### Upgrading from 0.6.0 to 0.7.0
 
@@ -654,6 +728,8 @@ Two internal changes worth knowing:
 ## 14. Docs
 
 - [中文文档](./README.md)：Chinese version of this document.
+- [docs/](./docs)：configuration, rate limiting, filters, async hooks, observability, admin API, tracing.
+- [CHANGELOG.md](./CHANGELOG.md)：changes by release.
 - [ASYNC_ACTIONS.md](./docs/ASYNC_ACTIONS.md)：async action contract.
 - [examples/api-governance-example](./examples/api-governance-example)：minimal runnable demo.
 

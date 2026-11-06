@@ -1,0 +1,6 @@
+# 0.8.0 启动种子规则失败数据：第一条缺少 limit
+rules:
+  - pattern: com.x.Bad#get
+    window: 10
+  - pattern: com.x.Good#get
+    limit: 3

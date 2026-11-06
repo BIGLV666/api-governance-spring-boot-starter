@@ -188,6 +188,11 @@ curl -X PUT ... -d '{"pattern": "com.x.OrderController#create", "limit": -1}'
 # limit=0 封禁（全部请求被 429 拒绝）
 curl -X PUT ... -d '{"pattern": "com.x.OrderController#create", "limit": 0}'
 
+# 0.8.0：临时规则设置 TTL（300 秒后自动失效）并记录操作人 / 原因
+curl -X PUT ... -H "X-Governance-Operator: alice" \
+  -d '{"pattern": "com.x.OrderController#create", "limit": 10, "window": 1,
+       "ttlSeconds": 300, "reason": "事故临时收紧"}'
+
 # 查询 / 删除
 curl http://host:8080/api-governance/rate-limiter/rules
 curl -X DELETE "http://host:8080/api-governance/rate-limiter/rules?pattern=com.x.OrderController%23create"
@@ -201,6 +206,62 @@ curl -X DELETE "http://host:8080/api-governance/rate-limiter/rules?pattern=com.x
   `com.x.User*` 会同时命中 `UserController` 与 `UserV2Controller`，需精确范围时请写到类名全称）；
 - 多条规则命中同一 API 时：精确 &gt; 最长前缀；
 - `limit`: -1 = 不限流（可覆盖注解）/ 0 = 封禁 / &gt;0 = 窗口内上限。
+
+**TTL 与操作元数据（0.8.0 新增）**：
+
+- `ttlSeconds`：规则有效期。缺省取 `dynamic-rules.default-ttl-seconds`（默认 0 = 永久）；
+  到期后请求热路径**惰性失效**（`now >= expiresAt` 即不再命中），不启动后台清理线程；
+  内存版会在下一次写入时顺带剔除过期规则，Redis 版加载时跳过过期规则。
+- `operator`（请求头 `X-Governance-Operator` 或 JSON 字段）与 `reason` 随规则保存并出现在
+  列表/导出结果中，最长 256 字符。临时封禁/收紧建议**始终设置 TTL**，避免事故结束后忘记解除。
+- 规则列表返回 `expiresAt`（毫秒时间戳，0 = 永久）与 `ttlSecondsRemaining`（剩余秒数，
+  -1 = 永久），可直接用于巡检告警。
+
+**规则来源解释（0.8.0 新增）**：`GET /rate-limiter/rules/effective?apiKey=` 返回注解/全局默认/
+动态规则各自的值与最终生效值，并标明来源（`dynamic-rule` / `method-annotation` /
+`class-annotation` / `global-default` / `none`）。切面与解释端点共用同一解析器
+（`RateLimitPolicyResolver`），排查「为什么这个接口没限流」时不用再读源码。
+
+**导入 / 导出 / 启动种子（0.8.0 新增）**：
+
+```bash
+# 导出全部未过期规则（可作为种子文件或灾备备份）
+curl http://host:8080/api-governance/rate-limiter/rules/export > rules.json
+
+# 批量导入（mode=merge 增量 / replace 整体替换；dryRun=true 只校验不写入）
+curl -X POST http://host:8080/api-governance/rate-limiter/rules/import \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "merge", "dryRun": true, "rules": [
+        {"pattern": "com.x.OrderController#create", "limit": 100, "ttlSeconds": 300}]}'
+```
+
+导入先整体校验：**任一规则非法则整批不写入**，返回 `errors` 逐条说明索引与原因。
+`replace` 模式会删除请求体中未出现的现有规则（同样写入审计）。
+
+启动种子规则用于「规则即代码」、新环境一键铺开与灾备恢复：
+
+```yaml
+api:
+  governance:
+    rate-limit:
+      dynamic-rules:
+        seed-location: classpath:governance-rules.yml   # 或 file:/etc/app/rules.yml
+        seed-fail-fast: true                            # 默认 true：文件/规则非法则启动失败
+```
+
+```yaml
+# governance-rules.yml
+rules:
+  - pattern: com.x.OrderController#create
+    limit: 100
+    window: 60
+    ttlSeconds: 300         # 可选，缺省取 default-ttl-seconds
+    operator: ops
+    reason: 大促临时收紧
+```
+
+种子文件在**所有单例就绪后**写入存储（与 `rate-limit.type` 联动，Redis 模式下同样全集群生效），
+写入过程记录 `SEED` 审计。`seed-fail-fast=false` 时非法规则仅 warn 并跳过，适合灰度环境。
 
 **存储与集群一致性**（随 `rate-limit.type` 联动）：
 
@@ -222,6 +283,10 @@ api:
         enabled: true               # 动态规则总开关（默认开，无规则时零行为变化）
         refresh-interval-ms: 5000   # Redis 模式版本轮询间隔（集群传播延迟上界）
         max-rules: 1000             # 规则数上限
+        default-ttl-seconds: 0      # 0.8.0：规则缺省有效期（0=永久）
+        audit-capacity: 1000        # 0.8.0：变更审计环形缓冲容量（0=关闭）
+        seed-location: ""           # 0.8.0：启动种子规则 YAML（空=不加载）
+        seed-fail-fast: true        # 0.8.0：种子非法时启动失败
 ```
 
 > 自定义存储：注册 `RateRuleStore` Bean 可完全替换内置实现（接口契约：`findMatch`

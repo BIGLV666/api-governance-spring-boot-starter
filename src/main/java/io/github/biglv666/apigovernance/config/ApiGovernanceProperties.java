@@ -373,6 +373,27 @@ public class ApiGovernanceProperties {
             /** 规则数上限（精确 + 前缀），防止误操作灌爆存储。 */
             private int maxRules = 1000;
 
+            /**
+             * 新建规则的默认有效期（秒，0.8.0 新增）：管理接口未显式传 {@code ttlSeconds}
+             * 时使用；0 表示永久有效。
+             */
+            private long defaultTtlSeconds = 0L;
+
+            /** 审计日志容量（0.8.0 新增）：0 表示关闭审计记录。 */
+            private int auditCapacity = 1000;
+
+            /**
+             * 启动种子规则文件位置（0.8.0 新增）：支持 {@code classpath:} / {@code file:}
+             * 前缀，YAML 格式 {@code rules: [...]}；空白表示不加载。
+             */
+            private String seedLocation = "";
+
+            /**
+             * 种子加载失败是否阻止启动（0.8.0 新增，默认 true）：
+             * false 时仅记录 warn，应用继续启动。
+             */
+            private boolean seedFailFast = true;
+
             public boolean isEnabled() {
                 return enabled;
             }
@@ -395,6 +416,38 @@ public class ApiGovernanceProperties {
 
             public void setMaxRules(int maxRules) {
                 this.maxRules = maxRules;
+            }
+
+            public long getDefaultTtlSeconds() {
+                return defaultTtlSeconds;
+            }
+
+            public void setDefaultTtlSeconds(long defaultTtlSeconds) {
+                this.defaultTtlSeconds = defaultTtlSeconds <= 0 ? 0L : defaultTtlSeconds;
+            }
+
+            public int getAuditCapacity() {
+                return auditCapacity;
+            }
+
+            public void setAuditCapacity(int auditCapacity) {
+                this.auditCapacity = Math.max(0, auditCapacity);
+            }
+
+            public String getSeedLocation() {
+                return seedLocation;
+            }
+
+            public void setSeedLocation(String seedLocation) {
+                this.seedLocation = seedLocation == null ? "" : seedLocation;
+            }
+
+            public boolean isSeedFailFast() {
+                return seedFailFast;
+            }
+
+            public void setSeedFailFast(boolean seedFailFast) {
+                this.seedFailFast = seedFailFast;
             }
         }
     }
@@ -477,12 +530,42 @@ public class ApiGovernanceProperties {
          */
         private boolean mutationsEnabled = true;
 
+        /**
+         * Actuator 健康检查开关（0.8.0 新增）：类路径存在 actuator 时注册
+         * {@code apiGovernance} 健康指示器，反映限流器 / 规则存储 / 异步线程池状态。
+         * 未引入 actuator 时本开关无效果。
+         */
+        private boolean healthEnabled = true;
+
+        /**
+         * 规则存储过期阈值倍数（0.8.0 新增）：Redis 模式下最近一次成功刷新距今超过
+         * {@code refresh-interval-ms × multiplier} 视为陈旧。默认 3 倍。
+         */
+        private int healthStaleMultiplier = 3;
+
         public boolean isMutationsEnabled() {
             return mutationsEnabled;
         }
 
         public void setMutationsEnabled(boolean mutationsEnabled) {
             this.mutationsEnabled = mutationsEnabled;
+        }
+
+        public boolean isHealthEnabled() {
+            return healthEnabled;
+        }
+
+        public void setHealthEnabled(boolean healthEnabled) {
+            this.healthEnabled = healthEnabled;
+        }
+
+        public int getHealthStaleMultiplier() {
+            return healthStaleMultiplier;
+        }
+
+        public void setHealthStaleMultiplier(int healthStaleMultiplier) {
+            this.healthStaleMultiplier = healthStaleMultiplier <= 0
+                    ? 3 : healthStaleMultiplier;
         }
 
         public String getAuthToken() {
