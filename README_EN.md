@@ -622,7 +622,7 @@ and `correlationId` independently — do not use `traceId` for consumer idempote
 | spring-boot-starter-aop | AOP + core container | No |
 | spring-web | @RestController annotations | No |
 | jakarta.servlet-api | admin auth filter (provided; supplied by host container at runtime) | No (not transitive) |
-| spring-boot-starter-actuator | Observation, tracing, Micrometer metrics | No |
+| spring-boot-starter-actuator | Observation, tracing, Micrometer metrics, health/info (since 0.8.0) | Yes |
 | micrometer-tracing-bridge-otel | OpenTelemetry bridge (optional since 0.4.0) | Yes |
 | opentelemetry-exporter-otlp | OTLP trace export (optional since 0.4.0) | Yes |
 | spring-kafka | Kafka tracing adapter | Yes |
