@@ -13,8 +13,6 @@
 
 ---
 
----
-
 ## Micrometer 指标桥接（0.2.0 新增）
 
 治理事件会自动同步为标准 Micrometer 指标（容器存在 `MeterRegistry` Bean 即生效，
@@ -42,8 +40,8 @@ management:
 
 仓库内置现成面板 [`grafana/api-governance-dashboard.json`](../grafana/api-governance-dashboard.json)
 （10 个面板：治理请求总量 / 拒绝占比 / 异常占比 / API 数量、请求速率按 outcome 堆叠、
-耗时 p50/p95/p99、被限流接口 Top 10、异步执行速率与线程池水位），已在真实
-PaperWise 应用 + Prometheus + Grafana 链路上验证：
+耗时 p50/p95/p99、被限流接口 Top 10、异步执行速率与线程池水位），已在真实应用
++ Prometheus + Grafana 链路上验证：
 
 ![Grafana 面板](../grafana/dashboard-screenshot.png)
 
@@ -74,8 +72,6 @@ management:
       percentiles-histogram:
         api.governance.request.duration: true
 ```
-
----
 
 ---
 

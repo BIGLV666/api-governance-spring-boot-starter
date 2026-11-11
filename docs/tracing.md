@@ -2,8 +2,6 @@
 
 > 本文档为[项目主页](../README.md)的拆分章节；索引与快速开始见主页。
 
-## 分布式链路追踪
-
 > **0.4.0 起 Micrometer Tracing 与 OTLP exporter 为可选依赖**：宿主需要链路上报时请显式引入
 > `io.micrometer:micrometer-tracing-bridge-otel` 与 `io.opentelemetry:opentelemetry-exporter-otlp`
 >（版本随 Spring Boot BOM 管理）。未引入时治理能力不受影响，异步任务上下文传播自动退化为空实现。

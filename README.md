@@ -17,35 +17,33 @@
 - ✅ **默认拦截所有 Controller 请求**：无需任何注解即可生效（治理 = 日志 + 指标统计）。
 - ✅ **最少注解**：仅 `@RateLimit` / `@ConcurrencyLimit` / `@Skip` / `@NoLog` 四个注解，按需覆盖默认行为。
 - ✅ **标准管道过滤器**：前置链短路（信息采集 → 流量统计 → 限流判断 → 自定义），
-  后置链兜底（记录耗时 → 更新统计 → 日志记录 → 自定义），`pjp.proceed()` 只调用一次。
-- ✅ **两种限流存储**：本机限流（零依赖）、Redis 限流（分布式，Redis 只封装 + Lua 原子化）。
-- ✅ **两种过滤算法**：令牌桶（平滑限流、支持突发）、滑动窗口（精确限流）。
-- ✅ **自定义算法策略**：注册 `RateLimiter` 或 `RateLimitStrategy` Bean 即可替换。
+  后置链兜底（记录耗时 → 更新统计 → 日志记录 → 自定义），`pjp.proceed()` 只调用一次；内置过滤器可开关、可覆盖。
+- ✅ **两种限流存储与两种算法**：本机限流（零依赖）/ Redis 限流（分布式，Lua 原子化），
+  令牌桶（平滑、支持突发）/ 滑动窗口（精确）；注册 `RateLimiter` 或 `RateLimitStrategy` Bean 即可替换。
 - ✅ **SpEL 参数维度限流**：`@RateLimit(key = "#userId")` 一个注解按参数值独立配额（受限求值上下文，安全）。
 - ✅ **限流故障降级**：Redis 故障时可配 fail-open（放行）/ fail-close（503 拒绝），并触发告警。
-- ✅ **Micrometer 指标桥接**：治理指标自动暴露到 `/actuator/prometheus` 等标准生态。
-- ✅ **告警插件**：慢方法 / 限流拒绝 / 限流器故障事件回调自定义通知器，内置 Webhook 原生对接钉钉（含加签）/企微/飞书，带告警风暴抑制。
+- ✅ **标准限流响应头**：429 响应自动携带 `RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset` / `Retry-After`。
+- ✅ **动态限流规则**：管理接口运行期提交规则（支持尾部 `*` 通配），无需重启即可调整/放开/封禁；
+  支持 TTL 自动失效、生效规则解释、变更审计、导入/导出与启动种子（规则即代码）。
+- ✅ **Micrometer 与 Grafana**：治理指标自动暴露到 `/actuator/prometheus`，内置 10 面板仪表盘 JSON。
+- ✅ **告警插件**：慢方法 / 限流拒绝 / 限流器故障事件回调自定义通知器，内置 Webhook 对接钉钉（含加签）/企微/飞书，
+  支持告警风暴抑制、恢复通知与多实例集群去重。
 - ✅ **bean / yml 双配置**：注册 Bean 覆盖、yml 配置默认，二选一。
 - ✅ **内存指标 + 有界滑动窗口**：记录慢方法与响应情况，随进程关闭而销毁，内存永不膨胀。
-- ✅ **后台管理接口**：供管理工具/运维平台查询与重置，可选静态令牌鉴权。
-- ✅ **轻量**：Redis / MQ 为可选依赖，无 Lombok，告警 Webhook 基于 JDK HttpClient。
-- ✅ **异步方法钩子**：`@AsyncAction` + `@AsyncHandler` 支持任意公开 Spring Bean 方法的四阶段旁路任务。
-- ✅ **内置过滤器可插拔**（0.3.0 新增）：5 个内置过滤器可按 `api.governance.filters.*` 开关，也可注册同类型 Bean 覆盖。
-- ✅ **HTTP 请求上下文**（0.3.0 新增）：自定义过滤器可直接读取真实请求 URI、HTTP 方法与客户端 IP，无需自行解 `RequestContextHolder`。
-- ✅ **治理范围可配置**（0.4.0 新增）：`include-packages` / `exclude-packages` 按包前缀批量圈定治理范围。
-- ✅ **链路追踪为可选依赖**（0.4.0 新增）：不使用 OpenTelemetry 时零追踪栈开销，治理能力完全不受影响。
-- ✅ **异步钩子可观测**（0.5.0 新增）：Handler 执行指标（次数/耗时/线程池水位）、管理端点注册清单、队列拒绝告警、启动期 action 交叉校验、内置 HTTP 上下文快照 enricher。
-- ✅ **标准限流响应头**（0.6.0 新增）：429 响应自动携带 `RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset` / `Retry-After`（对齐 IETF ratelimit-headers 草案字段名），客户端可机器可读地退避。
-- ✅ **告警恢复通知**（0.6.0 新增）：异常状况解除后（限流器故障后首次成功 / 慢方法安静超过抑制窗口）补发恢复事件，携带抑制期内被静默丢弃的告警条数。
-- ✅ **集群限流回归防线**（0.6.0 新增）：3 master Redis 集群集成测试验证 `resetAll` 多节点扇出与 Lua 限流正确性（集群未启动时自动跳过，CI 已内置集群启动步骤）。
-- ✅ **Grafana 面板**（0.6.0 新增）：内置 10 面板仪表盘 JSON（请求/拒绝/耗时分位/异步池水位），真实应用链路已验证，导入即用。
-- ✅ **动态限流规则**（0.7.0 新增）：管理接口运行期提交限流规则（支持尾部 `*` 通配），**无需重启即可调整/放开/封禁**；local 模式单节点生效，Redis 模式全集群秒级一致，存储故障 fail-stale 不影响业务。
-- ✅ **集群告警去重**（0.7.0 新增）：多实例部署时同一告警每抑制窗口全集群只发一条（含恢复通知），Redis `SET NX` 抢占，故障 fail-open 回退单机行为。
-- ✅ **规则生命周期闭环**（0.8.0 新增）：规则 TTL 自动失效（临时封禁/收紧到期即恢复，无需人工解除）、操作人/原因元数据、生效规则解释端点（一键回答「为什么没限流」）、变更审计与导入/导出/启动种子（规则即代码）。
-- ✅ **Actuator 健康与 Info**（0.8.0 新增）：`/actuator/health` 暴露限流器故障、规则存储陈旧与线程池饱和度，按 fail-strategy 区分 UP/DOWN，避免 Redis 抖动误触发探针重启；`/actuator/info` 展示实际生效配置。
-- ✅ **并发上限 bulkhead**（1.0.0 新增）：`@ConcurrencyLimit(permits = N)` + 动态规则 `maxConcurrent`，限制同时在途请求数，超限快速拒绝、不占线程；名额在 finally 归还，异常/超时路径不泄漏。
-- ✅ **过载保护与标准错误体**（1.0.0 新增）：可选请求体大小限制（反序列化前 413）、可选 RFC 9457 `application/problem+json` 错误响应；默认关闭，保持既有行为。
-- ✅ **Spring Boot 4.1 基线**（1.0.0 新增）：Spring Framework 7 / Jakarta EE 11 / Jackson 3，CI 覆盖 JDK 17 / 21 / 25；新增 CycloneDX SBOM、japicmp 兼容检查与可复现构建。
+- ✅ **后台管理接口**：供管理工具/运维平台查询与重置，可选静态令牌鉴权与只读模式。
+- ✅ **异步方法钩子**：`@AsyncAction` + `@AsyncHandler` 支持任意公开 Spring Bean 方法的四阶段旁路任务，
+  并提供执行指标、线程池水位、拒绝告警与启动期交叉校验。
+- ✅ **治理范围可配置**：`include-packages` / `exclude-packages` 按包前缀批量圈定治理范围。
+- ✅ **链路追踪可选**：不使用 OpenTelemetry 时零追踪栈开销，治理能力完全不受影响。
+- ✅ **Actuator 健康与 Info**：`/actuator/health` 暴露限流器故障、规则存储陈旧与线程池饱和度，
+  `/actuator/info` 展示实际生效配置。
+- ✅ **并发上限 bulkhead**（1.0.0 新增）：`@ConcurrencyLimit(permits = N)` + 动态规则 `maxConcurrent`，
+  限制同时在途请求数，超限快速拒绝、不占线程；名额在 finally 归还，异常/超时路径不泄漏。
+- ✅ **过载保护与标准错误体**（1.0.0 新增）：可选请求体大小限制（反序列化前 413）、
+  可选 RFC 9457 `application/problem+json` 错误响应；默认关闭，保持既有行为。
+- ✅ **Spring Boot 4.1 基线**（1.0.0 新增）：Spring Framework 7 / Jakarta EE 11 / Jackson 3，
+  CI 覆盖 JDK 17 / 21 / 25；新增 CycloneDX SBOM、japicmp 兼容检查与可复现构建。
+- ✅ **轻量**：Redis / MQ / Actuator 为可选依赖，无 Lombok，告警 Webhook 基于 JDK HttpClient。
 
 ---
 
@@ -104,6 +102,9 @@ public class UserController {
 }
 ```
 
+核心配置入口为 `application.yml` 的 `api.governance.*`，完整配置项见
+[配置参考](docs/configuration.md)。默认 `default-limit: -1`：管道会拦截统计，但不会拒绝请求。
+
 ---
 
 ## 文档导航
@@ -118,23 +119,13 @@ public class UserController {
 | [可观测性](docs/observability.md) | 内存指标、Micrometer 桥接、Grafana 面板、告警、Actuator 健康与 Info |
 | [后台管理接口](docs/management-api.md) | 管理端点、规则解释 / 审计 / 导入导出、鉴权、写操作开关 |
 | [分布式链路追踪](docs/tracing.md) | OpenTelemetry 集成与可选依赖说明 |
-| [依赖说明](docs/dependencies.md) | 依赖矩阵与可选依赖策略 |
+| [依赖说明](docs/dependencies.md) | 依赖矩阵、兼容范围与可选依赖策略 |
 | [版本升级](docs/upgrade.md) | 各版本迁移注意事项 |
 | [更新日志](CHANGELOG.md) | 按版本汇总的新增、变更与修复 |
 | [故障演练](drills/README.md) | Redis 故障降级 / 线程池饱和 / 告警生命周期（可复现） |
 | [可运行示例](examples/api-governance-example) | 最小示例工程（含演练 profile） |
-| [English](README_EN.md) | English overview |
-
-## 构建
-
-```bash
-mvnw.cmd clean install     # Windows
-./mvnw clean install       # Linux/macOS
-```
-
----
-
----
+| [English Guide](docs/guide-en.md) | 完整英文使用指南 |
+| [English README](README_EN.md) | English overview |
 
 ## 许可证
 

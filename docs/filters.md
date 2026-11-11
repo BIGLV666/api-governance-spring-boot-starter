@@ -2,8 +2,6 @@
 
 > 本文档为[项目主页](../README.md)的拆分章节；索引与快速开始见主页。
 
-## 过滤器管道（自定义插件）
-
 实现 `PreFilter` 或 `PostFilter` 并注册为 Spring Bean，即自动加入管道（按 `order` 排序）：
 
 ```java

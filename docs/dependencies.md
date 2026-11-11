@@ -2,8 +2,6 @@
 
 > 本文档为[项目主页](../README.md)的拆分章节；索引与快速开始见主页。
 
-## 依赖说明
-
 | 依赖 | 作用 | 是否可选 |
 |------|------|----------|
 | spring-boot-starter-aspectj | AOP + 核心容器（Boot 4 起由 starter-aop 更名） | 否 |
