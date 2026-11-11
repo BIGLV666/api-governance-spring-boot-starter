@@ -59,8 +59,8 @@ class OpsClosureAutoConfigurationTest {
                     RuleAuditLog auditLog = ctx.getBean(RuleAuditLog.class);
                     assertThat(auditLog.getCapacity()).isZero();
                     auditLog.record(new RuleAuditEntry(System.currentTimeMillis(),
-                            RuleAuditEntry.Action.PUT, "a.A#get", null, null, 1, 10, 0L,
-                            "ops", "", true, "test"));
+                            RuleAuditEntry.Action.PUT, "a.A#get", null, null, 1, 10,
+                            null, null, 0L, "ops", "", true, "test"));
                     assertThat(auditLog.size()).isZero();
                 });
     }

@@ -1,6 +1,6 @@
 package io.github.biglv666.apigovernance.management;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import io.github.biglv666.apigovernance.config.ApiGovernanceProperties;
 import io.github.biglv666.apigovernance.filter.FilterChain;
 import io.github.biglv666.apigovernance.metrics.MetricsRegistry;

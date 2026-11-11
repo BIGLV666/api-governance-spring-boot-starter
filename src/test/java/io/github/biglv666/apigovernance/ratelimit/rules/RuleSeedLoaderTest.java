@@ -30,6 +30,7 @@ class RuleSeedLoaderTest {
         assertThat(rules.get(0).getWindow()).isEqualTo(60);
         assertThat(rules.get(0).getTtlSeconds()).isEqualTo(300L);
         assertThat(rules.get(0).getOperator()).isEqualTo("ops");
+        assertThat(rules.get(0).getMaxConcurrent()).isEqualTo(4);
         assertThat(rules.get(1).getWindow()).isNull();
     }
 
@@ -64,6 +65,7 @@ class RuleSeedLoaderTest {
         assertThat(create.getTtlSecondsRemaining(System.currentTimeMillis())).isPositive();
         assertThat(create.getOperator()).isEqualTo("ops");
         assertThat(create.getReason()).isEqualTo("大促临时收紧");
+        assertThat(create.getMaxConcurrent()).isEqualTo(4);
 
         DynamicRateRule read = store.all().get("com.x.OrderController#read");
         assertThat(read).isNotNull();

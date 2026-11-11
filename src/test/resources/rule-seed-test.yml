@@ -6,6 +6,7 @@ rules:
     ttlSeconds: 300
     operator: ops
     reason: 大促临时收紧
+    maxConcurrent: 4
   - pattern: com.x.OrderController#read
     limit: 0
     ttlSeconds: 60

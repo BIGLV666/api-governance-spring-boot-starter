@@ -12,22 +12,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 兼容矩阵（0.7.0 起）：Boot 3.3/3.4/3.5 × JDK 17/21。
-        # parent 版本无法用 property 占位，矩阵 job 内以 sed 替换后构建。
-        java: [ '17', '21' ]
-        boot-version: [ '3.3.13', '3.4.13', '3.5.16' ]
+        # 1.0.0 起：Spring Boot 4.1 基线 × JDK 17/21/25。
+        java: [ '17', '21', '25' ]
     steps:
       - uses: actions/checkout@v4
       - name: Set up JDK ${{ matrix.java }}
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: ${{ matrix.java }}
           distribution: 'temurin'
           cache: maven
-      - name: Pin Spring Boot parent to ${{ matrix.boot-version }}
-        run: |
-          sed -i "s|<version>3\.5\.16</version>|<version>${{ matrix.boot-version }}</version>|" pom.xml
-          grep -A1 "<artifactId>spring-boot-starter-parent</artifactId>" pom.xml
       - name: Start Redis cluster (3 masters, for RedisClusterRateLimiterIntegrationTest)
         run: |
           docker run -d --name governance-redis-cluster \
@@ -45,7 +39,10 @@ jobs:
             sleep 1
           done
           docker exec governance-redis-cluster redis-cli --cluster check 127.0.0.1:7000
-      - name: Build & Test (Boot ${{ matrix.boot-version }}, JDK ${{ matrix.java }})
+      - name: Build & Test (Boot 4.1, JDK ${{ matrix.java }})
         run: mvn -B test --file pom.xml
-      - name: Install to local repo (verify packaging)
+      - name: Package + SBOM (verify packaging)
         run: mvn -B install -DskipTests -Dgpg.skip=true --file pom.xml
+      - name: Binary compatibility (japicmp)
+        if: matrix.java == '17'
+        run: mvn -B -Pcompat verify -DskipTests -Dgpg.skip=true --file pom.xml

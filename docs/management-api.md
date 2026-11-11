@@ -56,11 +56,14 @@ api:
 
 ```bash
 # 提交规则（pattern 支持尾部 * 前缀通配；limit: -1=放开 / 0=封禁 / >0=上限；window 缺省取全局 default-window）
+# 1.0.0 起支持 maxConcurrent（并发上限：0=不干预 / -1=关闭 / >0=上限）
 curl -X PUT http://host:8080/api-governance/rate-limiter/rules \
   -H "Content-Type: application/json" -H "X-Governance-Token: $GOVERNANCE_TOKEN" \
-  -d '{"pattern": "com.x.OrderController#create", "limit": 100, "window": 60}'
+  -d '{"pattern": "com.x.OrderController#create", "limit": 100, "window": 60,
+       "maxConcurrent": 10}'
 
-# {"success": true, "message": "规则已生效", "pattern": "com.x.OrderController#create", "limit": 100, "window": 60}
+# {"success": true, "message": "规则已生效", "pattern": "com.x.OrderController#create",
+#  "limit": 100, "window": 60, "maxConcurrent": 10, ...}
 
 # 查询全部规则（含存储类型 in-memory / redis 与写入时间）
 curl http://host:8080/api-governance/rate-limiter/rules
@@ -69,8 +72,8 @@ curl http://host:8080/api-governance/rate-limiter/rules
 curl -X DELETE "http://host:8080/api-governance/rate-limiter/rules?pattern=com.x.OrderController%23create"
 ```
 
-> 参数校验失败（缺 pattern/limit、中间通配、window&lt;1、超出 max-rules 上限）与 Redis 存储写入
-> 失败均返回 `{"success": false, "message": "..."}`，不会产生半写入状态。
+> 参数校验失败（缺 pattern/limit、中间通配、window&lt;1、maxConcurrent&lt;-1、超出 max-rules 上限）
+> 与 Redis 存储写入失败均返回 `{"success": false, "message": "..."}`，不会产生半写入状态。
 > 语义与优先级详见[限流 → 动态限流规则](rate-limiting.md)。
 
 **0.8.0 新增端点**：
@@ -85,13 +88,16 @@ curl "http://host:8080/api-governance/rate-limiter/rules/effective?apiKey=com.x.
 #   "globalDefault": {"limit": -1, "window": 1},
 #   "dynamicRule": null,
 #   "effective": {"limit": 100, "window": 60, "enabled": true, "source": "method-annotation"},
+#   "concurrency": {"annotationPermits": 10, "permits": 10, "enabled": true,
+#                   "source": "class-annotation", "globalDefault": -1},
 #   "keyExpression": "", "store": "in-memory"
 # }
 
 # 2) 规则变更审计（默认内存环形缓冲，capacity=0 时关闭）
 curl "http://host:8080/api-governance/rate-limiter/rules/audit?limit=20"
 # 每条含 timestamp/action(PUT|DELETE|IMPORT|REPLACE|SEED)/pattern/
-# beforeLimit/beforeWindow/afterLimit/afterWindow/expiresAt/
+# beforeLimit/beforeWindow/afterLimit/afterWindow/
+# beforeMaxConcurrent/afterMaxConcurrent/expiresAt/
 # operator/clientIp/success/message
 
 # 3) 导出（可作为种子文件或灾备备份）

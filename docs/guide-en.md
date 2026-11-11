@@ -34,6 +34,20 @@ api:
         audit-capacity: 1000          # new in 0.8.0: in-memory audit ring buffer (0 = disabled)
         seed-location: ""             # new in 0.8.0: startup seed YAML (classpath:/file:)
         seed-fail-fast: true          # new in 0.8.0: invalid seed fails startup (false = skip + warn)
+    concurrency-limit:                # new in 1.0.0: in-flight request cap (bulkhead)
+      enabled: true                   # applies when annotation/dynamic rule/global default permits > 0
+      default-permits: -1             # global default (-1 = unlimited)
+      max-entries: 10000              # local semaphore key cap
+      idle-timeout-ms: 600000         # idle bucket eviction
+      reject-status: 429
+      message: "Too many concurrent requests, please retry later"
+    body-size-limit:                  # new in 1.0.0: request body size limit (off by default)
+      enabled: false
+      max-bytes: 1048576              # 1 MiB
+      reject-status: 413
+      message: "Request body exceeds the size limit"
+    problem-details:                  # new in 1.0.0: RFC 9457 application/problem+json (off by default)
+      enabled: false
     filters:                          # built-in filter switches (new in 0.3.0); same-type beans also override
       metadata-collector: true
       traffic-statistics: true
@@ -245,6 +259,40 @@ rules:
     reason: campaign tightening
 ```
 
+### 9) Concurrency bulkhead (new in 1.0.0)
+
+Rate limiting caps requests per second but not in-flight requests; a slow downstream can still
+occupy every worker thread. `@ConcurrencyLimit` caps simultaneous executions and rejects excess
+requests immediately (no queueing, no thread occupied):
+
+```java
+@PostMapping("/orders")
+@ConcurrencyLimit(permits = 10)   // at most 10 in-flight requests
+public Order create(@RequestBody Order order) { ... }
+```
+
+Dynamic rules expose the same control through `maxConcurrent` (`>0` cap, `0` no override, `-1`
+disable), so an incident can tighten or lift it without a restart. Permits are released in
+`finally` — exceptions and timeouts cannot leak them. Default rejection is 429 with
+`Retry-After: 1`. The bulkhead is per API and process-local in 1.0.0 (no Redis lease); Spring MVC
+async return values (`Callable`/`DeferredResult`) release the permit when the handler returns, so
+use synchronous handlers where the cap must cover the actual work.
+
+Optional overload protection:
+
+```yaml
+api:
+  governance:
+    body-size-limit:
+      enabled: true
+      max-bytes: 1048576        # 413 before deserialization
+    problem-details:
+      enabled: true             # RFC 9457 application/problem+json
+```
+
+Length-unknown form/multipart bodies are rejected (the container parses them before the wrapper
+can count bytes); send `Content-Length` for those. See [concurrency.md](concurrency.md).
+
 ---
 
 ## 3. Filter Pipeline (custom plugins)
@@ -421,7 +469,7 @@ Base path defaults to `/api-governance` (configurable):
 | POST | `/rate-limiter/reset?key=` | reset a key |
 | POST | `/rate-limiter/reset-all` | reset all |
 | GET | `/rate-limiter/rules` | dynamic rate-limit rules list (new in 0.7.0; TTL/metadata since 0.8.0) |
-| PUT | `/rate-limiter/rules` | upsert one dynamic rule, effective immediately (new in 0.7.0; `ttlSeconds`/`operator`/`reason` since 0.8.0) |
+| PUT | `/rate-limiter/rules` | upsert one dynamic rule, effective immediately (new in 0.7.0; `ttlSeconds`/`operator`/`reason` since 0.8.0, `maxConcurrent` since 1.0.0) |
 | DELETE | `/rate-limiter/rules?pattern=` | delete one dynamic rule (idempotent, new in 0.7.0) |
 | GET | `/rate-limiter/rules/effective?apiKey=` | explain the effective policy and its source (new in 0.8.0) |
 | GET | `/rate-limiter/rules/audit?limit=` | rule change audit, newest first (new in 0.8.0) |
@@ -505,7 +553,7 @@ and `correlationId` independently — do not use `traceId` for consumer idempote
 
 | Dependency | Purpose | Optional |
 |------------|---------|----------|
-| spring-boot-starter-aop | AOP + core container | No |
+| spring-boot-starter-aspectj | AOP + core container (renamed from starter-aop in Boot 4) | No |
 | spring-web | @RestController annotations | No |
 | jakarta.servlet-api | admin auth filter (provided; supplied by host container at runtime) | No (not transitive) |
 | spring-boot-starter-actuator | Observation, tracing, Micrometer metrics, health/info (since 0.8.0) | Yes |
@@ -518,10 +566,31 @@ and `correlationId` independently — do not use `traceId` for consumer idempote
 
 > No `spring-boot-starter-web` (no embedded server), no Lombok. Webhook alerting uses the JDK 17
 > HttpClient (zero third-party dependencies). Redis is optional.
+> **1.0.0 compatibility:** Spring Boot 4.1.x, JDK 17–25 (Spring Framework 7 / Jakarta EE 11 / Jackson 3).
 
 ---
 
 ## 11. Version Upgrades
+
+### Upgrading from 0.8.0 to 1.0.0
+
+1.0.0 is a platform major release and **requires Spring Boot 4.1.x / Java 17+**:
+
+1. **Platform**: Boot 3.5 → 4.1 (Spring Framework 7, Jakarta EE 11, Jackson 3). Hosts using
+   Jackson 2 directly must migrate to `tools.jackson.*`;
+2. **Starter renames**: `spring-boot-starter-aop` → `spring-boot-starter-aspectj`; MockMvc test
+   auto-configuration moved to `spring-boot-starter-webmvc-test`;
+3. **Actuator health package**: `org.springframework.boot.actuate.health.*` →
+   `org.springframework.boot.health.contributor.*`;
+4. **Concurrency governance is on by default but inert** unless an annotation, dynamic rule or
+   positive global default applies. Custom `RateRuleStore` implementations that only implement the
+   three-argument `put` reject non-zero `maxConcurrent` instead of silently dropping it;
+5. **Minor public type changes**: `RuleAuditEntry` gained
+   `beforeMaxConcurrent` / `afterMaxConcurrent`; `ApiKeyResolution` gained `targetClass` / `method`;
+   `GovernanceExceptionHandler` gained a constructor accepting properties; `GovernanceAspect` gained
+   a four-argument constructor (older constructors kept).
+
+`body-size-limit` and `problem-details` are off by default. 0.8.0 is the last Boot 3.x release.
 
 ### Upgrading from 0.7.0 to 0.8.0
 

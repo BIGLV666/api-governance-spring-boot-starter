@@ -76,6 +76,27 @@ class RedisRateRuleStoreIsolatedIntegrationTest {
     }
 
     @Test
+    void ttlMetadataAndConcurrencyRoundTripThroughRedis() {
+        RedisRateRuleStore store = new RedisRateRuleStore(redisTemplate, 60_000, 100);
+        try {
+            store.put(DynamicRateRule.of("meta.A#get", 7, 15, 60L, "ops", "incident", 3));
+
+            DynamicRateRule restored = store.findMatch("meta.A#get").orElseThrow();
+            assertThat(restored.getLimit()).isEqualTo(7);
+            assertThat(restored.getWindow()).isEqualTo(15);
+            assertThat(restored.getOperator()).isEqualTo("ops");
+            assertThat(restored.getReason()).isEqualTo("incident");
+            assertThat(restored.getMaxConcurrent()).isEqualTo(3);
+            assertThat(restored.getTtlSecondsRemaining(System.currentTimeMillis()))
+                    .isBetween(1L, 60L);
+        } finally {
+            store.close();
+            redisTemplate.delete(RedisRateRuleStore.RULES_KEY);
+            redisTemplate.delete(RedisRateRuleStore.VERSION_KEY);
+        }
+    }
+
+    @Test
     void redisFailureKeepsLastSnapshotAndRejectsWrites() throws IOException {
         // 独立实例：本用例起自己的内嵌 Redis 并在用例内停止，不影响类级实例与其他用例
         int ownPort;

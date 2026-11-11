@@ -1,5 +1,6 @@
 package io.github.biglv666.example;
 
+import io.github.biglv666.apigovernance.annotation.ConcurrencyLimit;
 import io.github.biglv666.apigovernance.annotation.RateLimit;
 import io.github.biglv666.apigovernance.annotation.Skip;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -24,5 +25,16 @@ public class OrderController {
     @Skip(reason = "健康检查完全放行")
     public String health() {
         return "UP";
+    }
+
+    /**
+     * 并发上限演示（1.0.0）：同时最多 2 个请求在途，第 3 个立即 429。
+     * 用并发工具同时发起多个请求即可观察到拒绝。
+     */
+    @GetMapping("/api/bulkhead")
+    @ConcurrencyLimit(permits = 2)
+    public Map<String, Object> bulkhead() throws InterruptedException {
+        Thread.sleep(200L);
+        return Map.of("ok", true);
     }
 }

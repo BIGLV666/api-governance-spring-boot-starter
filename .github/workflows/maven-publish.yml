@@ -50,4 +50,5 @@ jobs:
           files: |
             target/*.jar
             target/*.pom
+            target/*-cyclonedx.json
           generate_release_notes: true

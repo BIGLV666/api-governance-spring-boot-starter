@@ -17,6 +17,8 @@ package io.github.biglv666.apigovernance.ratelimit.rules;
  * @param beforeWindow 变更前 window（可空）
  * @param afterLimit   变更后 limit（可空）
  * @param afterWindow  变更后 window（可空）
+ * @param beforeMaxConcurrent 变更前并发上限（可空，1.0.0 新增）
+ * @param afterMaxConcurrent  变更后并发上限（可空，1.0.0 新增）
  * @param expiresAtMs  变更后到期时间（毫秒，0 = 永久）
  * @param operator     操作人
  * @param clientIp     来源 IP（非 HTTP 调用时为空串）
@@ -27,9 +29,10 @@ package io.github.biglv666.apigovernance.ratelimit.rules;
  */
 public record RuleAuditEntry(long timestampMs, Action action, String pattern,
                             Integer beforeLimit, Integer beforeWindow,
-                            Integer afterLimit, Integer afterWindow, long expiresAtMs,
-                            String operator, String clientIp, boolean success,
-                            String message) {
+                            Integer afterLimit, Integer afterWindow,
+                            Integer beforeMaxConcurrent, Integer afterMaxConcurrent,
+                            long expiresAtMs, String operator, String clientIp,
+                            boolean success, String message) {
 
     /** 审计动作类型。 */
     public enum Action {

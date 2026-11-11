@@ -6,8 +6,8 @@ import io.github.biglv666.apigovernance.ratelimit.RateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.rules.DynamicRateRule;
 import io.github.biglv666.apigovernance.ratelimit.rules.RateRuleStore;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.actuate.health.Health;
-import org.springframework.boot.actuate.health.Status;
+import org.springframework.boot.health.contributor.Health;
+import org.springframework.boot.health.contributor.Status;
 import org.springframework.boot.actuate.info.Info;
 import org.springframework.boot.actuate.info.InfoContributor;
 

@@ -1,5 +1,6 @@
 package io.github.biglv666.apigovernance.filter;
 
+import io.github.biglv666.apigovernance.ratelimit.rules.DynamicRateRule;
 import org.aspectj.lang.ProceedingJoinPoint;
 
 import java.lang.reflect.Method;
@@ -72,6 +73,15 @@ public class FilterContext {
      * 为 null 表示不使用参数维度限流。
      */
     private String rateLimitKeySuffix;
+
+    /** 命中的动态限流规则（1.0.0 新增，供并发策略复用同一次查找；未命中为 null）。 */
+    private DynamicRateRule dynamicRule;
+
+    /** 本次请求的并发上限（1.0.0 新增，-1 表示未启用）。 */
+    private int concurrencyLimit = -1;
+
+    /** 本次请求是否启用并发限制（1.0.0 新增）。 */
+    private boolean concurrencyLimitEnabled = false;
 
     /** 本次请求是否输出日志（默认开启，可由 @NoLog 关闭）。 */
     private boolean logEnabled = true;
@@ -206,6 +216,35 @@ public class FilterContext {
 
     public void setRateLimitKeySuffix(String rateLimitKeySuffix) {
         this.rateLimitKeySuffix = rateLimitKeySuffix;
+    }
+
+    // ==================== 并发限制（1.0.0 新增） ====================
+
+    /** 命中的动态限流规则（供并发策略复用，未命中为 null）。 */
+    public DynamicRateRule getDynamicRule() {
+        return dynamicRule;
+    }
+
+    public void setDynamicRule(DynamicRateRule dynamicRule) {
+        this.dynamicRule = dynamicRule;
+    }
+
+    /** 本次请求的并发上限（-1 表示未启用）。 */
+    public int getConcurrencyLimit() {
+        return concurrencyLimit;
+    }
+
+    public void setConcurrencyLimit(int concurrencyLimit) {
+        this.concurrencyLimit = concurrencyLimit;
+    }
+
+    /** 本次请求是否启用并发限制。 */
+    public boolean isConcurrencyLimitEnabled() {
+        return concurrencyLimitEnabled;
+    }
+
+    public void setConcurrencyLimitEnabled(boolean concurrencyLimitEnabled) {
+        this.concurrencyLimitEnabled = concurrencyLimitEnabled;
     }
 
     // ==================== 日志配置 ====================

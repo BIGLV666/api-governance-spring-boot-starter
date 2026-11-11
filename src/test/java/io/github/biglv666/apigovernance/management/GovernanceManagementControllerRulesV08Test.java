@@ -1,5 +1,6 @@
 package io.github.biglv666.apigovernance.management;
 
+import io.github.biglv666.apigovernance.annotation.ConcurrencyLimit;
 import io.github.biglv666.apigovernance.annotation.RateLimit;
 import io.github.biglv666.apigovernance.config.ApiGovernanceProperties;
 import io.github.biglv666.apigovernance.filter.FilterChain;
@@ -35,6 +36,7 @@ class GovernanceManagementControllerRulesV08Test {
 
     @RestController
     @RateLimit(limit = 4, window = 20)
+    @ConcurrencyLimit(permits = 6)
     static class EffectiveController {
 
         @GetMapping("/effective")
@@ -87,6 +89,37 @@ class GovernanceManagementControllerRulesV08Test {
                 .andExpect(jsonPath("$.rules[0].operator").value("alice"))
                 .andExpect(jsonPath("$.rules[0].reason").value("大促收紧"))
                 .andExpect(jsonPath("$.rules[0].ttlSecondsRemaining").isNumber());
+    }
+
+    @Test
+    void putRuleWithMaxConcurrent() throws Exception {
+        mockMvc.perform(put("/api-governance/rate-limiter/rules")
+                        .contentType("application/json")
+                        .content("{\"pattern\":\"com.x.A#get\",\"limit\":5,"
+                                + "\"maxConcurrent\":3}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.maxConcurrent").value(3));
+
+        mockMvc.perform(get("/api-governance/rate-limiter/rules"))
+                .andExpect(jsonPath("$.rules[0].maxConcurrent").value(3));
+
+        mockMvc.perform(get("/api-governance/rate-limiter/rules/audit"))
+                .andExpect(jsonPath("$.entries[0].afterMaxConcurrent").value(3));
+    }
+
+    @Test
+    void putRuleRejectsInvalidMaxConcurrent() throws Exception {
+        mockMvc.perform(put("/api-governance/rate-limiter/rules")
+                        .contentType("application/json")
+                        .content("{\"pattern\":\"a.A#get\",\"limit\":1,\"maxConcurrent\":-2}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.message").value(containsString("maxConcurrent")));
+
+        mockMvc.perform(get("/api-governance/rate-limiter/rules/audit"))
+                .andExpect(jsonPath("$.entries[0].success").value(false))
+                .andExpect(jsonPath("$.entries[0].message").value(containsString("maxConcurrent")));
     }
 
     @Test
@@ -278,7 +311,24 @@ class GovernanceManagementControllerRulesV08Test {
                 .andExpect(jsonPath("$.effective.enabled").value(true))
                 .andExpect(jsonPath("$.effective.source").value("dynamic-rule"))
                 .andExpect(jsonPath("$.dynamicRule.pattern").value(apiKey))
+                .andExpect(jsonPath("$.concurrency.permits").value(6))
+                .andExpect(jsonPath("$.concurrency.source").value("class-annotation"))
                 .andExpect(jsonPath("$.store").value("in-memory"));
+    }
+
+    @Test
+    void effectiveEndpointExplainsDynamicConcurrencyOverride() throws Exception {
+        String apiKey = EffectiveController.class.getName() + "#effective";
+        store.put(io.github.biglv666.apigovernance.ratelimit.rules.DynamicRateRule.of(
+                apiKey, 100, 60, null, "ops", "incident", 2));
+
+        mockMvc.perform(get("/api-governance/rate-limiter/rules/effective")
+                        .param("apiKey", apiKey))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.concurrency.permits").value(2))
+                .andExpect(jsonPath("$.concurrency.enabled").value(true))
+                .andExpect(jsonPath("$.concurrency.source").value("dynamic-rule"))
+                .andExpect(jsonPath("$.dynamicRule.maxConcurrent").value(2));
     }
 
     @Test

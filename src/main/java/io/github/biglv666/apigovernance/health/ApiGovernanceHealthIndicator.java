@@ -5,8 +5,8 @@ import io.github.biglv666.apigovernance.config.ApiGovernanceProperties;
 import io.github.biglv666.apigovernance.ratelimit.FailSafeRateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.RateLimiter;
 import io.github.biglv666.apigovernance.ratelimit.rules.RateRuleStore;
-import org.springframework.boot.actuate.health.Health;
-import org.springframework.boot.actuate.health.HealthIndicator;
+import org.springframework.boot.health.contributor.Health;
+import org.springframework.boot.health.contributor.HealthIndicator;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;

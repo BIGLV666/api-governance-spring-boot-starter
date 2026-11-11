@@ -1,8 +1,15 @@
 package io.github.biglv666.apigovernance.exception;
 
+import io.github.biglv666.apigovernance.config.ApiGovernanceProperties;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.RequestAttributes;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -36,6 +43,24 @@ import java.util.Map;
 @RestControllerAdvice
 public class GovernanceExceptionHandler {
 
+    private final ApiGovernanceProperties properties;
+
+    /**
+     * 构造处理器（默认不启用 RFC 9457，保持 0.8.0 响应结构）。
+     */
+    public GovernanceExceptionHandler() {
+        this(null);
+    }
+
+    /**
+     * 构造处理器。
+     *
+     * @param properties 全局配置（可为 null，按默认结构输出）
+     */
+    public GovernanceExceptionHandler(ApiGovernanceProperties properties) {
+        this.properties = properties;
+    }
+
     /**
      * 处理治理拒绝异常。
      *
@@ -43,15 +68,25 @@ public class GovernanceExceptionHandler {
      * 会原样写入响应；宿主若自定义 {@code GovernanceExceptionHandler} Bean 覆盖本类，
      * 需自行处理 {@link GovernanceException#getHeaders()}。
      *
+     * <p>{@code api.governance.problem-details.enabled=true} 时按 RFC 9457 输出
+     * {@code application/problem+json}；默认关闭，保持原有响应结构。
+     *
      * @param ex 治理拒绝异常
      * @return 携带统一 JSON 结构与治理响应头的响应实体
      */
     @ExceptionHandler(GovernanceException.class)
     public ResponseEntity<Map<String, Object>> handleGovernanceException(GovernanceException ex) {
-        Map<String, Object> body = buildBody(ex.getCode(), ex.getMessage(), ex.getStatus());
-        return ResponseEntity.status(ex.getStatus())
-                .headers(h -> ex.getHeaders().forEach(h::set))
-                .body(body);
+        HttpServletRequest request = currentRequest();
+        boolean problemDetails = properties != null
+                && properties.getProblemDetails().isEnabled();
+        Map<String, Object> body = problemDetails
+                ? buildProblemBody(ex, request) : buildBody(ex.getCode(), ex.getMessage(), ex.getStatus());
+        ResponseEntity.BodyBuilder builder = ResponseEntity.status(ex.getStatus())
+                .headers(h -> ex.getHeaders().forEach(h::set));
+        if (problemDetails) {
+            builder.contentType(MediaType.parseMediaType("application/problem+json"));
+        }
+        return builder.body(body);
     }
 
     /**
@@ -68,6 +103,37 @@ public class GovernanceExceptionHandler {
         body.put("code", code);
         body.put("message", message);
         body.put("status", status);
+        body.put("timestamp", Instant.now().toString());
+        return body;
+    }
+
+    /**
+     * 构建 RFC 9457 Problem Details 响应体。
+     *
+     * <p>核心字段：{@code type}（默认 {@code about:blank}）、{@code title}、
+     * {@code status}、{@code detail}、{@code instance}；另保留治理扩展字段
+     * {@code code} 与 {@code timestamp}，便于既有工具过渡。
+     *
+     * @param ex      治理拒绝异常
+     * @param request 当前请求
+     * @return problem+json 响应体
+     */
+    private static HttpServletRequest currentRequest() {
+        RequestAttributes attributes = RequestContextHolder.getRequestAttributes();
+        return attributes instanceof ServletRequestAttributes servletAttributes
+                ? servletAttributes.getRequest() : null;
+    }
+
+    private Map<String, Object> buildProblemBody(GovernanceException ex,
+                                                 HttpServletRequest request) {
+        HttpStatus httpStatus = HttpStatus.resolve(ex.getStatus());
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("type", "about:blank");
+        body.put("title", httpStatus != null ? httpStatus.getReasonPhrase() : "Governance Rejected");
+        body.put("status", ex.getStatus());
+        body.put("detail", ex.getMessage());
+        body.put("instance", request != null ? request.getRequestURI() : null);
+        body.put("code", ex.getCode());
         body.put("timestamp", Instant.now().toString());
         return body;
     }

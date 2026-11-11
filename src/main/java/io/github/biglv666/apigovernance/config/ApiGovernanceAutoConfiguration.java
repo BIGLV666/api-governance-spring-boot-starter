@@ -21,6 +21,8 @@ import io.github.biglv666.apigovernance.async.spi.AsyncHandlerExceptionHandler;
 import io.github.biglv666.apigovernance.async.spi.AsyncTaskRejectionHandler;
 import io.github.biglv666.apigovernance.async.spi.AsyncTaskContextPropagator;
 import io.github.biglv666.apigovernance.aspect.GovernanceAspect;
+import io.github.biglv666.apigovernance.concurrency.ConcurrencyLimiter;
+import io.github.biglv666.apigovernance.concurrency.LocalConcurrencyLimiter;
 import io.github.biglv666.apigovernance.exception.GovernanceExceptionHandler;
 import io.github.biglv666.apigovernance.filter.FilterChain;
 import io.github.biglv666.apigovernance.filter.PostFilter;
@@ -38,6 +40,7 @@ import io.github.biglv666.apigovernance.metrics.MetricsEventListener;
 import io.github.biglv666.apigovernance.metrics.MetricsRegistry;
 import io.github.biglv666.apigovernance.metrics.micrometer.MicrometerAsyncExecutionListener;
 import io.github.biglv666.apigovernance.metrics.micrometer.MicrometerMetricsEventListener;
+import io.github.biglv666.apigovernance.web.BodySizeLimitFilter;
 import io.github.biglv666.apigovernance.ratelimit.DefaultRateLimitKeyResolver;
 import io.github.biglv666.apigovernance.ratelimit.RateLimitAlgorithm;
 import io.github.biglv666.apigovernance.ratelimit.RateLimitKeyResolver;
@@ -452,12 +455,28 @@ public class ApiGovernanceAutoConfiguration {
      * Controller 治理管道的唯一 AOP 切面入口。
      * 注册自定义 {@code GovernanceAspect} Bean 可完全替换（0.4.0 起）。
      */
+    /**
+     * 本地并发限制器（1.0.0 新增）：按 API 分桶的信号量，进程内生效。
+     * 注册自定义 {@link ConcurrencyLimiter} Bean 可替换（如 Redis 分布式信号量）。
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "api.governance.concurrency-limit", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public ConcurrencyLimiter concurrencyLimiter(ApiGovernanceProperties properties) {
+        return new LocalConcurrencyLimiter(
+                properties.getConcurrencyLimit().getMaxEntries(),
+                properties.getConcurrencyLimit().getIdleTimeoutMs());
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public GovernanceAspect governanceAspect(FilterChain filterChain,
                                              ApiGovernanceProperties properties,
-                                             ObjectProvider<RateRuleStore> rateRuleStores) {
-        return new GovernanceAspect(filterChain, properties, rateRuleStores.getIfAvailable());
+                                             ObjectProvider<RateRuleStore> rateRuleStores,
+                                             ObjectProvider<ConcurrencyLimiter> concurrencyLimiters) {
+        return new GovernanceAspect(filterChain, properties, rateRuleStores.getIfAvailable(),
+                concurrencyLimiters.getIfAvailable());
     }
 
     /**
@@ -465,8 +484,9 @@ public class ApiGovernanceAutoConfiguration {
      */
     @Bean
     @ConditionalOnMissingBean
-    public GovernanceExceptionHandler governanceExceptionHandler() {
-        return new GovernanceExceptionHandler();
+    public GovernanceExceptionHandler governanceExceptionHandler(
+            ApiGovernanceProperties properties) {
+        return new GovernanceExceptionHandler(properties);
     }
 
     // ==================== 方法生命周期异步插件 ====================
@@ -583,6 +603,26 @@ public class ApiGovernanceAutoConfiguration {
     }
 
     /**
+     * 请求体大小限制过滤器（1.0.0 新增，默认关闭）：在反序列化前拒绝超大 body。
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "api.governance.body-size-limit", name = "enabled",
+            havingValue = "true")
+    public FilterRegistrationBean<BodySizeLimitFilter> bodySizeLimitFilter(
+            ApiGovernanceProperties properties) {
+        ApiGovernanceProperties.BodySizeLimit config = properties.getBodySizeLimit();
+        FilterRegistrationBean<BodySizeLimitFilter> registration = new FilterRegistrationBean<>(
+                new BodySizeLimitFilter(config.getMaxBytes(), config.getRejectStatus(),
+                        config.getMessage()));
+        registration.addUrlPatterns("/*");
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 250);
+        registration.setName("apiGovernanceBodySizeLimitFilter");
+        log.info("启用请求体大小限制 - maxBytes: {}, status: {}",
+                config.getMaxBytes(), config.getRejectStatus());
+        return registration;
+    }
+
+    /**
      * 管理接口轻量鉴权过滤器：仅当配置了 {@code management.auth-token} 时启用拦截；
      * 未配置令牌时注册但禁用（行为与未注册一致，保持向后兼容）。
      */
@@ -680,7 +720,7 @@ public class ApiGovernanceAutoConfiguration {
      * 加载本配置类即触发类加载错误。
      */
     @Configuration(proxyBeanMethods = false)
-    @ConditionalOnClass(name = "org.springframework.boot.actuate.health.HealthIndicator")
+    @ConditionalOnClass(name = "org.springframework.boot.health.contributor.HealthIndicator")
     @ConditionalOnProperty(prefix = "api.governance.management", name = "health-enabled",
             havingValue = "true", matchIfMissing = true)
     static class GovernanceActuatorConfiguration {

@@ -204,6 +204,8 @@ curl -X DELETE "http://host:8080/api-governance/rate-limiter/rules?pattern=com.x
   `com.x.User*` 会同时命中 `UserController` 与 `UserV2Controller`，需精确范围时请写到类名全称）；
 - 多条规则命中同一 API 时：精确 &gt; 最长前缀；
 - `limit`: -1 = 不限流（可覆盖注解）/ 0 = 封禁 / &gt;0 = 窗口内上限。
+- `maxConcurrent`（1.0.0 新增）：并发的在途请求上限，`>0` 覆盖、`0` 不干预、`-1` 关闭；
+  与 QPS 限流互补，详见[并发治理](concurrency.md)。
 
 **TTL 与操作元数据（0.8.0 新增）**：
 

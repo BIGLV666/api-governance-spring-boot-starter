@@ -16,7 +16,7 @@ strategies, admin endpoints — with **no heavy external dependencies**.
 ## Features
 
 - ✅ **Intercepts all Controller requests by default** — no annotations required (governance = logging + metrics).
-- ✅ **Minimal annotations** — only `@RateLimit` / `@Skip` / `@NoLog`, to override defaults where needed.
+- ✅ **Minimal annotations** — only `@RateLimit` / `@ConcurrencyLimit` / `@Skip` / `@NoLog`, to override defaults where needed.
 - ✅ **Standard filter pipeline** — pre-chain short-circuits (metadata → traffic stats → rate limit → custom),
   post-chain always runs (elapsed time → stats → logging → custom); `pjp.proceed()` is invoked exactly once.
 - ✅ **Two storages, two algorithms** — local (zero dependency) and Redis (distributed, atomic Lua);
@@ -40,8 +40,14 @@ strategies, admin endpoints — with **no heavy external dependencies**.
 - ✅ **Optional tracing** — no OpenTelemetry stack required unless you want trace reporting.
 - ✅ **Actuator health & info** — limiter failures, stale rule stores and pool saturation on `/actuator/health`;
   effective configuration on `/actuator/info`.
+- ✅ **Concurrency bulkhead** (new in 1.0.0) — `@ConcurrencyLimit(permits = N)` plus dynamic rule
+  `maxConcurrent` caps in-flight requests per endpoint; excess requests fail fast without occupying
+  threads, and permits are released in `finally`.
+- ✅ **Overload protection & standard errors** (new in 1.0.0) — optional request-body size limit
+  (413 before deserialization) and optional RFC 9457 `application/problem+json` responses; both off by default.
+- ✅ **Spring Boot 4.1 baseline** (new in 1.0.0) — Spring Framework 7 / Jakarta EE 11 / Jackson 3,
+  CI on JDK 17 / 21 / 25, CycloneDX SBOM and japicmp compatibility check.
 - ✅ **Lightweight** — Redis / MQ / Actuator are optional; no Lombok; webhook uses the JDK HttpClient.
-- ✅ **Boot 3.3–3.5** — Spring Boot 3.5 baseline, JDK 17/21.
 
 ---
 
@@ -53,13 +59,12 @@ strategies, admin endpoints — with **no heavy external dependencies**.
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.5.0</version>
+    <version>1.0.0</version>
 </dependency>
 ```
 
-> The snippet above uses **0.5.0**, the latest version published on Maven Central. The repository
-> source is at **0.8.0**; 0.6.0–0.8.0 are not released yet. Build from source and install locally if
-> you need the newer capabilities.
+> 1.0.0 targets **Spring Boot 4.1.x / Java 17+** (Jackson 3). Hosts still on Boot 3.3–3.5 should
+> use 0.8.0.
 
 ### 2) It just works
 
@@ -114,6 +119,7 @@ intercepts and measures but never rejects.
 |----------|---------|
 | [Configuration](docs/configuration.md) | All `api.governance.*` properties and defaults |
 | [Rate limiting](docs/rate-limiting.md) | Local / Redis, algorithms, SpEL keys, headers, failure policy, dynamic rules |
+| [Concurrency](docs/concurrency.md) | Bulkhead, dynamic `maxConcurrent`, body-size limit, RFC 9457 errors |
 | [Filter pipeline](docs/filters.md) | Custom `PreFilter` / `PostFilter` plugins and built-in filters |
 | [Async hooks](docs/async.md) | `@AsyncAction` / `@AsyncHandler` and observability ([contract](docs/ASYNC_ACTIONS.md)) |
 | [Observability](docs/observability.md) | In-memory metrics, Micrometer, Grafana, alerts, Actuator health/info |

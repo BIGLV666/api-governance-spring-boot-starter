@@ -1,7 +1,7 @@
 package io.github.biglv666.apigovernance.management;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import io.github.biglv666.apigovernance.async.internal.AsyncHandlerRegistry;
 import io.github.biglv666.apigovernance.async.internal.DefaultAsyncExecutorProvider;
 import io.github.biglv666.apigovernance.config.ApiGovernanceProperties;
@@ -331,8 +331,13 @@ class GovernanceManagementControllerTest {
         properties.setIncludePackages(List.of("com.example.api"));
         properties.setExcludePackages(List.of("com.example.internal"));
         properties.getManagement().setMutationsEnabled(false);
+        properties.getManagement().setHealthEnabled(false);
         properties.getAsync().setIgnoreUnmatchedHandlers(true);
         properties.getAsync().setWebContextEnrichment(false);
+        properties.getRateLimit().getDynamicRules().setMaxRules(42);
+        properties.getConcurrencyLimit().setDefaultPermits(50);
+        properties.getBodySizeLimit().setEnabled(true);
+        properties.getProblemDetails().setEnabled(true);
 
         MockMvc scoped = MockMvcBuilders.standaloneSetup(
                         new GovernanceManagementController(properties, rateLimiter,
@@ -344,6 +349,11 @@ class GovernanceManagementControllerTest {
                 .andExpect(jsonPath("$.includePackages[0]").value("com.example.api"))
                 .andExpect(jsonPath("$.excludePackages[0]").value("com.example.internal"))
                 .andExpect(jsonPath("$.management.mutationsEnabled").value(false))
+                .andExpect(jsonPath("$.management.healthEnabled").value(false))
+                .andExpect(jsonPath("$.rateLimit.dynamicRules.maxRules").value(42))
+                .andExpect(jsonPath("$.concurrencyLimit.defaultPermits").value(50))
+                .andExpect(jsonPath("$.bodySizeLimit.enabled").value(true))
+                .andExpect(jsonPath("$.problemDetails.enabled").value(true))
                 .andExpect(jsonPath("$.async.ignoreUnmatchedHandlers").value(true))
                 .andExpect(jsonPath("$.async.webContextEnrichment").value(false));
     }
