@@ -29,6 +29,7 @@ import java.util.List;
  *     ttlSeconds: 300          # 可选，缺省取 default-ttl-seconds
  *     operator: ops
  *     reason: 大促临时收紧
+ *     maxConcurrent: 10        # 可选，1.0.0 新增：并发上限
  * </pre>
  *
  * <p>使用 Spring Boot 自带的 YAML 解析器，不引入 Jackson 等额外依赖。
@@ -117,8 +118,8 @@ public final class RuleSeedLoader {
         try {
             auditLog.record(new RuleAuditEntry(System.currentTimeMillis(),
                     RuleAuditEntry.Action.SEED, rule.getPattern(), null, null,
-                    rule.getLimit(), rule.getWindow(), rule.getExpiresAtMs(),
-                    rule.getOperator(), "", success, message));
+                    rule.getLimit(), rule.getWindow(), null, rule.getMaxConcurrent(),
+                    rule.getExpiresAtMs(), rule.getOperator(), "", success, message));
         } catch (RuntimeException e) {
             log.warn("记录规则审计失败（不影响种子加载）: {}", e.getMessage());
         }
@@ -134,7 +135,8 @@ public final class RuleSeedLoader {
                     RuleAuditEntry.Action.SEED, seed.getPattern(), null, null,
                     seed.getLimit(),
                     seed.getWindow() != null ? seed.getWindow() : defaultWindow,
-                    0L, seed.getOperator() == null ? "seed" : seed.getOperator(),
+                    null, seed.getMaxConcurrent(), 0L,
+                    seed.getOperator() == null ? "seed" : seed.getOperator(),
                     "", false, message));
         } catch (RuntimeException e) {
             log.warn("记录规则审计失败（不影响种子加载）: {}", e.getMessage());
@@ -152,6 +154,7 @@ public final class RuleSeedLoader {
         private Long ttlSeconds;
         private String operator;
         private String reason;
+        private Integer maxConcurrent;
 
         public String getPattern() {
             return pattern;
@@ -201,6 +204,14 @@ public final class RuleSeedLoader {
             this.reason = reason;
         }
 
+        public Integer getMaxConcurrent() {
+            return maxConcurrent;
+        }
+
+        public void setMaxConcurrent(Integer maxConcurrent) {
+            this.maxConcurrent = maxConcurrent;
+        }
+
         DynamicRateRule toRule(int defaultWindow, long defaultTtlSeconds) {
             if (pattern == null || pattern.isBlank()) {
                 throw new IllegalArgumentException("种子规则缺少 pattern");
@@ -214,7 +225,7 @@ public final class RuleSeedLoader {
                     ? "seed" : operator;
             return DynamicRateRule.of(pattern, limit, effectiveWindow,
                     effectiveTtl, effectiveOperator,
-                    reason == null ? "seed" : reason);
+                    reason == null ? "seed" : reason, maxConcurrent);
         }
     }
 }

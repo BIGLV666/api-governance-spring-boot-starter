@@ -32,6 +32,20 @@ api:
         audit-capacity: 1000          # 0.8.0 新增：内存审计环形缓冲容量（0=关闭审计）
         seed-location: ""             # 0.8.0 新增：启动种子规则 YAML（classpath:/file:，空=不加载）
         seed-fail-fast: true          # 0.8.0 新增：种子规则非法时启动失败（false=跳过并 warn）
+    concurrency-limit:                # 1.0.0 新增：并发上限（bulkhead）
+      enabled: true                   # 总开关（注解/动态规则 maxConcurrent/全局默认 >0 时生效）
+      default-permits: -1             # 全局默认并发上限（-1=不限制）
+      max-entries: 10000              # 本地信号量 key 上限
+      idle-timeout-ms: 600000         # 空闲桶淘汰阈值
+      reject-status: 429              # 并发超限状态码
+      message: "并发请求过多，请稍后重试"
+    body-size-limit:                  # 1.0.0 新增：请求体大小限制（默认关闭）
+      enabled: false
+      max-bytes: 1048576              # 1 MiB
+      reject-status: 413
+      message: "请求体超过大小限制"
+    problem-details:                  # 1.0.0 新增：RFC 9457 application/problem+json（默认关闭）
+      enabled: false
     filters:                          # 内置过滤器开关（0.3.0 新增），也可注册同类型 Bean 覆盖
       metadata-collector: true
       traffic-statistics: true

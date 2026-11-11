@@ -414,7 +414,7 @@ public class RedisRateRuleStore implements RateRuleStore, AutoCloseable {
 
     /**
      * 编码规则为 Hash value：
-     * {@code limit|window|updatedAtMs|expiresAtMs|urlencoded(operator)|urlencoded(reason)}。
+     * {@code limit|window|updatedAtMs|expiresAtMs|urlencoded(operator)|urlencoded(reason)|maxConcurrent}。
      *
      * <p>操作人/原因经 URL 编码，避免其中的 {@code |} 破坏字段分隔。
      */
@@ -422,7 +422,8 @@ public class RedisRateRuleStore implements RateRuleStore, AutoCloseable {
         return rule.getLimit() + "|" + rule.getWindow() + "|" + rule.getUpdatedAtMs()
                 + "|" + rule.getExpiresAtMs()
                 + "|" + encodeMetadata(rule.getOperator())
-                + "|" + encodeMetadata(rule.getReason());
+                + "|" + encodeMetadata(rule.getReason())
+                + "|" + rule.getMaxConcurrent();
     }
 
     /**
@@ -442,8 +443,10 @@ public class RedisRateRuleStore implements RateRuleStore, AutoCloseable {
                     ? Long.parseLong(parts[3]) : 0L;
             String operator = parts.length >= 5 ? decodeMetadata(parts[4]) : "";
             String reason = parts.length >= 6 ? decodeMetadata(parts[5]) : "";
+            int maxConcurrent = parts.length >= 7 && !parts[6].isEmpty()
+                    ? Integer.parseInt(parts[6]) : 0;
             return DynamicRateRule.restore(pattern, limit, window, updatedAt,
-                    expiresAt, operator, reason);
+                    expiresAt, operator, reason, maxConcurrent);
         } catch (Exception e) {
             log.warn("跳过无法解析的动态规则 - pattern: '{}', value: '{}'", pattern, value);
             return null;

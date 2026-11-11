@@ -4,6 +4,8 @@ import io.github.biglv666.apigovernance.async.AsyncHandlerInfo;
 import io.github.biglv666.apigovernance.async.internal.AsyncHandlerRegistry;
 import io.github.biglv666.apigovernance.async.spi.AsyncExecutorProvider;
 import io.github.biglv666.apigovernance.annotation.Skip;
+import io.github.biglv666.apigovernance.concurrency.ConcurrencyPolicy;
+import io.github.biglv666.apigovernance.concurrency.ConcurrencyPolicyResolver;
 import io.github.biglv666.apigovernance.config.ApiGovernanceProperties;
 import io.github.biglv666.apigovernance.filter.Filter;
 import io.github.biglv666.apigovernance.filter.FilterChain;
@@ -406,6 +408,17 @@ public class GovernanceManagementController {
         body.put("dynamicRule", policy.getDynamicRule() == null
                 ? null : ruleToMap(policy.getDynamicRule(), System.currentTimeMillis()));
         body.put("effective", effective);
+
+        ConcurrencyPolicy concurrency = ConcurrencyPolicyResolver.resolve(
+                resolution.targetClass(), resolution.method(), properties, policy.getDynamicRule());
+        Map<String, Object> concurrencyBody = new LinkedHashMap<>();
+        concurrencyBody.put("annotationPermits", concurrency.getAnnotationPermits());
+        concurrencyBody.put("permits", concurrency.getPermits());
+        concurrencyBody.put("enabled", concurrency.isEnabled());
+        concurrencyBody.put("source", concurrency.getSource().getCode());
+        concurrencyBody.put("globalDefault", properties.getConcurrencyLimit().getDefaultPermits());
+        body.put("concurrency", concurrencyBody);
+
         body.put("keyExpression", policy.getKeyExpression());
         body.put("store", rateRuleStore == null ? null : rateRuleStore.getName());
         return body;
@@ -428,6 +441,8 @@ public class GovernanceManagementController {
             item.put("beforeWindow", entry.beforeWindow());
             item.put("afterLimit", entry.afterLimit());
             item.put("afterWindow", entry.afterWindow());
+            item.put("beforeMaxConcurrent", entry.beforeMaxConcurrent());
+            item.put("afterMaxConcurrent", entry.afterMaxConcurrent());
             item.put("expiresAt", entry.expiresAtMs());
             item.put("operator", entry.operator());
             item.put("clientIp", entry.clientIp());
@@ -657,10 +672,12 @@ public class GovernanceManagementController {
         String operator = firstNonBlank(parseStringField(requestBody.get("operator")),
                 currentOperator());
         String reason = parseStringField(requestBody.get("reason"));
+        Integer maxConcurrent = parseIntField(requestBody.get("maxConcurrent"));
 
         DynamicRateRule rule;
         try {
-            rule = DynamicRateRule.of(pattern, limit, window, ttlSeconds, operator, reason);
+            rule = DynamicRateRule.of(pattern, limit, window, ttlSeconds, operator, reason,
+                    maxConcurrent);
         } catch (IllegalArgumentException e) {
             recordAudit(RuleAuditEntry.Action.PUT, pattern, null, null, operator,
                     false, e.getMessage());
@@ -690,6 +707,7 @@ public class GovernanceManagementController {
         body.put("ttlSecondsRemaining", rule.getTtlSecondsRemaining(System.currentTimeMillis()));
         body.put("operator", rule.getOperator());
         body.put("reason", rule.getReason());
+        body.put("maxConcurrent", rule.getMaxConcurrent());
         body.put("store", rateRuleStore.getName());
         log.warn("提交动态限流规则 - pattern: {}, limit: {}, window: {}s, ttl: {}s, operator: {}, store: {}",
                 rule.getPattern(), rule.getLimit(), rule.getWindow(), ttlSeconds,
@@ -755,7 +773,12 @@ public class GovernanceManagementController {
                 : properties.getRateLimit().getDynamicRules().getDefaultTtlSeconds();
         String operator = firstNonBlank(parseStringField(item.get("operator")), "import");
         String reason = parseStringField(item.get("reason"));
-        return DynamicRateRule.of(pattern, limit, window, effectiveTtl, operator, reason);
+        Integer maxConcurrent = parseIntField(item.get("maxConcurrent"));
+        if (maxConcurrent != null && maxConcurrent < -1) {
+            throw new IllegalArgumentException("maxConcurrent 至少为 -1（-1=关闭，0=不干预，>0=并发上限）");
+        }
+        return DynamicRateRule.of(pattern, limit, window, effectiveTtl, operator, reason,
+                maxConcurrent);
     }
 
     /**
@@ -771,6 +794,7 @@ public class GovernanceManagementController {
         item.put("ttlSecondsRemaining", rule.getTtlSecondsRemaining(nowMs));
         item.put("operator", rule.getOperator());
         item.put("reason", rule.getReason());
+        item.put("maxConcurrent", rule.getMaxConcurrent());
         return item;
     }
 
@@ -786,6 +810,8 @@ public class GovernanceManagementController {
                     before == null ? null : before.getWindow(),
                     after == null ? null : after.getLimit(),
                     after == null ? null : after.getWindow(),
+                    before == null ? null : before.getMaxConcurrent(),
+                    after == null ? null : after.getMaxConcurrent(),
                     after == null ? 0L : after.getExpiresAtMs(),
                     operator, currentClientIp(), success, message));
         } catch (RuntimeException e) {
@@ -1115,6 +1141,15 @@ public class GovernanceManagementController {
         dstRl.setMessage(srcRl.getMessage());
         dstRl.setFailStrategy(srcRl.getFailStrategy());
         dstRl.setMaxEntries(srcRl.getMaxEntries());
+        ApiGovernanceProperties.RateLimit.DynamicRules srcRules = srcRl.getDynamicRules();
+        ApiGovernanceProperties.RateLimit.DynamicRules dstRules = dstRl.getDynamicRules();
+        dstRules.setEnabled(srcRules.isEnabled());
+        dstRules.setRefreshIntervalMs(srcRules.getRefreshIntervalMs());
+        dstRules.setMaxRules(srcRules.getMaxRules());
+        dstRules.setDefaultTtlSeconds(srcRules.getDefaultTtlSeconds());
+        dstRules.setAuditCapacity(srcRules.getAuditCapacity());
+        dstRules.setSeedLocation(srcRules.getSeedLocation());
+        dstRules.setSeedFailFast(srcRules.isSeedFailFast());
 
         ApiGovernanceProperties.Metrics srcMetrics = properties.getMetrics();
         ApiGovernanceProperties.Metrics dstMetrics = masked.getMetrics();
@@ -1129,6 +1164,8 @@ public class GovernanceManagementController {
         dstMgmt.setBasePath(srcMgmt.getBasePath());
         dstMgmt.setAuthHeader(srcMgmt.getAuthHeader());
         dstMgmt.setMutationsEnabled(srcMgmt.isMutationsEnabled());
+        dstMgmt.setHealthEnabled(srcMgmt.isHealthEnabled());
+        dstMgmt.setHealthStaleMultiplier(srcMgmt.getHealthStaleMultiplier());
         // 鉴权令牌：非空即掩码，绝不回显明文
         dstMgmt.setAuthToken(maskIfPresent(srcMgmt.getAuthToken()));
 
@@ -1175,6 +1212,24 @@ public class GovernanceManagementController {
         dstFilters.setRateLimit(srcFilters.isRateLimit());
         dstFilters.setSlowMethod(srcFilters.isSlowMethod());
         dstFilters.setLogging(srcFilters.isLogging());
+
+        ApiGovernanceProperties.Concurrency srcConcurrency = properties.getConcurrencyLimit();
+        ApiGovernanceProperties.Concurrency dstConcurrency = masked.getConcurrencyLimit();
+        dstConcurrency.setEnabled(srcConcurrency.isEnabled());
+        dstConcurrency.setDefaultPermits(srcConcurrency.getDefaultPermits());
+        dstConcurrency.setMaxEntries(srcConcurrency.getMaxEntries());
+        dstConcurrency.setIdleTimeoutMs(srcConcurrency.getIdleTimeoutMs());
+        dstConcurrency.setRejectStatus(srcConcurrency.getRejectStatus());
+        dstConcurrency.setMessage(srcConcurrency.getMessage());
+
+        ApiGovernanceProperties.BodySizeLimit srcBody = properties.getBodySizeLimit();
+        ApiGovernanceProperties.BodySizeLimit dstBody = masked.getBodySizeLimit();
+        dstBody.setEnabled(srcBody.isEnabled());
+        dstBody.setMaxBytes(srcBody.getMaxBytes());
+        dstBody.setRejectStatus(srcBody.getRejectStatus());
+        dstBody.setMessage(srcBody.getMessage());
+
+        masked.getProblemDetails().setEnabled(properties.getProblemDetails().isEnabled());
 
         return masked;
     }

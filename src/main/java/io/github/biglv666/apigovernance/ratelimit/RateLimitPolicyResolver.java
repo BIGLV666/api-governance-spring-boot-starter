@@ -126,14 +126,14 @@ public final class RateLimitPolicyResolver {
                                                     RateRuleStore store) {
         if (apiKey == null || apiKey.isBlank()) {
             return new ApiKeyResolution(resolve(null, null, "", properties, store),
-                    false, false, false, "apiKey 不能为空");
+                    false, false, false, "apiKey 不能为空", null, null);
         }
         String trimmed = apiKey.trim();
         int hash = trimmed.lastIndexOf('#');
         if (hash <= 0 || hash == trimmed.length() - 1) {
             return new ApiKeyResolution(resolve(null, null, trimmed, properties, store),
                     false, false, false,
-                    "apiKey 格式应为 全限定类名#方法名，收到: " + trimmed);
+                    "apiKey 格式应为 全限定类名#方法名，收到: " + trimmed, null, null);
         }
         String className = trimmed.substring(0, hash);
         String methodPart = trimmed.substring(hash + 1);
@@ -144,7 +144,8 @@ public final class RateLimitPolicyResolver {
                     RateLimitPolicyResolver.class.getClassLoader());
         } catch (Exception | LinkageError e) {
             return new ApiKeyResolution(resolve(null, null, trimmed, properties, store),
-                    false, false, false, "无法加载类 " + className + ": " + e.getMessage());
+                    false, false, false, "无法加载类 " + className + ": " + e.getMessage(),
+                    null, null);
         }
 
         MethodLookup lookup = findMappedMethod(targetClass, methodPart);
@@ -153,7 +154,7 @@ public final class RateLimitPolicyResolver {
                 ? "类内存在多个同名映射方法，已按参数列表选择: " + lookup.method()
                 : (lookup.method() == null ? "未找到映射方法 " + methodPart + "，仅按类级注解解释" : null);
         return new ApiKeyResolution(policy, true, lookup.method() != null,
-                lookup.ambiguous(), message);
+                lookup.ambiguous(), message, targetClass, lookup.method());
     }
 
     private static MethodLookup findMappedMethod(Class<?> targetClass, String methodPart) {
@@ -220,8 +221,11 @@ public final class RateLimitPolicyResolver {
      * @param methodResolved   是否成功定位映射方法
      * @param ambiguous        是否因方法重载而存在歧义（已取确定性首选）
      * @param message          补充说明（无法解析时给出原因）
+     * @param targetClass      反查到的 Controller 类（无法解析时为 null，1.0.0 新增）
+     * @param method           反查到的映射方法（无法解析时为 null，1.0.0 新增）
      */
     public record ApiKeyResolution(RateLimitPolicy policy, boolean classResolved,
-                                   boolean methodResolved, boolean ambiguous, String message) {
+                                   boolean methodResolved, boolean ambiguous, String message,
+                                   Class<?> targetClass, Method method) {
     }
 }

@@ -84,6 +84,15 @@ public class ApiGovernanceProperties {
     /** 内置过滤器开关配置。 */
     private Filters filters = new Filters();
 
+    /** 并发上限（bulkhead）配置（1.0.0 新增）。 */
+    private Concurrency concurrencyLimit = new Concurrency();
+
+    /** 请求体大小限制配置（1.0.0 新增）。 */
+    private BodySizeLimit bodySizeLimit = new BodySizeLimit();
+
+    /** RFC 9457 标准错误体配置（1.0.0 新增）。 */
+    private ProblemDetails problemDetails = new ProblemDetails();
+
     /**
      * 治理范围包前缀（0.4.0 新增）：非空时<b>仅治理</b>命中这些前缀的包，
      * 其余包中的 Controller 完全放行（与 @Skip 等价语义）。空列表 = 治理全部。
@@ -168,6 +177,30 @@ public class ApiGovernanceProperties {
 
     public void setFilters(Filters filters) {
         this.filters = filters;
+    }
+
+    public Concurrency getConcurrencyLimit() {
+        return concurrencyLimit;
+    }
+
+    public void setConcurrencyLimit(Concurrency concurrencyLimit) {
+        this.concurrencyLimit = concurrencyLimit;
+    }
+
+    public BodySizeLimit getBodySizeLimit() {
+        return bodySizeLimit;
+    }
+
+    public void setBodySizeLimit(BodySizeLimit bodySizeLimit) {
+        this.bodySizeLimit = bodySizeLimit;
+    }
+
+    public ProblemDetails getProblemDetails() {
+        return problemDetails;
+    }
+
+    public void setProblemDetails(ProblemDetails problemDetails) {
+        this.problemDetails = problemDetails;
     }
 
     public List<String> getIncludePackages() {
@@ -823,6 +856,153 @@ public class ApiGovernanceProperties {
 
         public void setLogging(boolean logging) {
             this.logging = logging;
+        }
+    }
+
+    /**
+     * 并发上限（bulkhead）配置（1.0.0 新增）。
+     *
+     * <p>总开关默认开启，但只有接口标注 {@code @ConcurrencyLimit} 或动态规则设置
+     * {@code maxConcurrent} 时才真正生效 —— 未配置时零行为变化。
+     */
+    public static class Concurrency {
+
+        /** 并发治理总开关。 */
+        private boolean enabled = true;
+
+        /** 全局默认并发上限（-1 = 不限制；>0 时对未标注接口也生效）。 */
+        private int defaultPermits = -1;
+
+        /** 本地信号量维护的 key 数量上限。 */
+        private int maxEntries = 10000;
+
+        /** 空闲桶淘汰阈值（毫秒，至少 1000）。 */
+        private long idleTimeoutMs = 600_000L;
+
+        /** 并发超限拒绝的状态码（默认 429）。 */
+        private int rejectStatus = 429;
+
+        /** 并发超限拒绝提示语。 */
+        private String message = "并发请求过多，请稍后重试";
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public int getDefaultPermits() {
+            return defaultPermits;
+        }
+
+        public void setDefaultPermits(int defaultPermits) {
+            this.defaultPermits = defaultPermits < -1 ? -1 : defaultPermits;
+        }
+
+        public int getMaxEntries() {
+            return maxEntries;
+        }
+
+        public void setMaxEntries(int maxEntries) {
+            this.maxEntries = Math.max(1, maxEntries);
+        }
+
+        public long getIdleTimeoutMs() {
+            return idleTimeoutMs;
+        }
+
+        public void setIdleTimeoutMs(long idleTimeoutMs) {
+            this.idleTimeoutMs = Math.max(1000L, idleTimeoutMs);
+        }
+
+        public int getRejectStatus() {
+            return rejectStatus;
+        }
+
+        public void setRejectStatus(int rejectStatus) {
+            this.rejectStatus = rejectStatus > 0 ? rejectStatus : 429;
+        }
+
+        public String getMessage() {
+            return message;
+        }
+
+        public void setMessage(String message) {
+            this.message = message == null || message.isBlank()
+                    ? "并发请求过多，请稍后重试" : message;
+        }
+    }
+
+    /**
+     * 请求体大小限制配置（1.0.0 新增，默认关闭）。
+     */
+    public static class BodySizeLimit {
+
+        /** 是否启用请求体大小限制。 */
+        private boolean enabled = false;
+
+        /** 允许的最大请求体字节数（默认 1 MiB）。 */
+        private long maxBytes = 1_048_576L;
+
+        /** 超限拒绝状态码（默认 413）。 */
+        private int rejectStatus = 413;
+
+        /** 超限拒绝提示语。 */
+        private String message = "请求体超过大小限制";
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public long getMaxBytes() {
+            return maxBytes;
+        }
+
+        public void setMaxBytes(long maxBytes) {
+            this.maxBytes = maxBytes > 0 ? maxBytes : 1_048_576L;
+        }
+
+        public int getRejectStatus() {
+            return rejectStatus;
+        }
+
+        public void setRejectStatus(int rejectStatus) {
+            this.rejectStatus = rejectStatus > 0 ? rejectStatus : 413;
+        }
+
+        public String getMessage() {
+            return message;
+        }
+
+        public void setMessage(String message) {
+            this.message = message == null || message.isBlank()
+                    ? "请求体超过大小限制" : message;
+        }
+    }
+
+    /**
+     * RFC 9457（Problem Details for HTTP APIs）错误体配置（1.0.0 新增）。
+     *
+     * <p>默认关闭：关闭时保持 {@code {success, code, message, status, timestamp}}
+     * 的现有响应结构，开启后治理拒绝响应使用 {@code application/problem+json}。
+     */
+    public static class ProblemDetails {
+
+        /** 是否启用 RFC 9457 错误体。 */
+        private boolean enabled = false;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
         }
     }
 

@@ -7,6 +7,10 @@ import org.aspectj.lang.annotation.Pointcut;
 import org.aspectj.lang.reflect.MethodSignature;
 import io.github.biglv666.apigovernance.annotation.NoLog;
 import io.github.biglv666.apigovernance.annotation.Skip;
+import io.github.biglv666.apigovernance.concurrency.ConcurrencyLimiter;
+import io.github.biglv666.apigovernance.concurrency.ConcurrencyPermit;
+import io.github.biglv666.apigovernance.concurrency.ConcurrencyPolicy;
+import io.github.biglv666.apigovernance.concurrency.ConcurrencyPolicyResolver;
 import io.github.biglv666.apigovernance.config.ApiGovernanceProperties;
 import io.github.biglv666.apigovernance.exception.GovernanceException;
 import io.github.biglv666.apigovernance.filter.FilterChain;
@@ -37,7 +41,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.Map;
 
 /**
  * Controller 治理主切面 —— 整条 Controller 过滤器管道只有这一个
@@ -87,6 +90,12 @@ public class GovernanceAspect {
      */
     private final RateRuleStore rateRuleStore;
 
+    /**
+     * 并发限制器（1.0.0 新增，可为 null：未启用并发治理或测试手工构造）。
+     * 热路径仅一次判空；未标注 {@code @ConcurrencyLimit} 且无动态规则时不产生任何开销。
+     */
+    private final ConcurrencyLimiter concurrencyLimiter;
+
     /** SpEL 表达式解析器（限流键）。 */
     private final ExpressionParser rateLimitKeyParser = new SpelExpressionParser();
 
@@ -109,7 +118,7 @@ public class GovernanceAspect {
      * @param properties  全局配置
      */
     public GovernanceAspect(FilterChain filterChain, ApiGovernanceProperties properties) {
-        this(filterChain, properties, null);
+        this(filterChain, properties, null, null);
     }
 
     /**
@@ -121,9 +130,23 @@ public class GovernanceAspect {
      */
     public GovernanceAspect(FilterChain filterChain, ApiGovernanceProperties properties,
                             RateRuleStore rateRuleStore) {
+        this(filterChain, properties, rateRuleStore, null);
+    }
+
+    /**
+     * 构造切面（1.0.0 起主构造器，含并发限制器）。
+     *
+     * @param filterChain        过滤器链
+     * @param properties         全局配置
+     * @param rateRuleStore      动态限流规则存储（null 表示不启用动态规则覆盖）
+     * @param concurrencyLimiter 并发限制器（null 表示不启用并发限制）
+     */
+    public GovernanceAspect(FilterChain filterChain, ApiGovernanceProperties properties,
+                            RateRuleStore rateRuleStore, ConcurrencyLimiter concurrencyLimiter) {
         this.filterChain = filterChain;
         this.properties = properties;
         this.rateRuleStore = rateRuleStore;
+        this.concurrencyLimiter = concurrencyLimiter;
     }
 
     /**
@@ -176,11 +199,13 @@ public class GovernanceAspect {
                 joinPoint.getArgs());
         injectHttpRequest(context);
         resolveRateLimit(targetClass, method, context);
+        resolveConcurrency(targetClass, method, context);
         resolveLogEnabled(targetClass, method, context);
 
         Object result = null;
         Throwable error = null;
         boolean rejected = false;
+        ConcurrencyPermit permit = null;
         try {
             // 6. 前置过滤器链：任一 false 即短路
             if (!filterChain.executePreFilters(context)) {
@@ -192,13 +217,40 @@ public class GovernanceAspect {
                         context.getRejectReason() != null ? context.getRejectReason() : "请求被拒绝",
                         context.getResponseHeaders());
             }
-            // 7. 执行业务逻辑（只调用一次）
+            // 7. 并发准入：拿不到名额立即拒绝（不排队、不占线程）；
+            //    permit 在 finally 中释放，异常/超时路径同样归还
+            if (context.isConcurrencyLimitEnabled() && concurrencyLimiter != null) {
+                boolean limiterFailed = false;
+                try {
+                    permit = concurrencyLimiter.tryAcquire(context.getApiKey(),
+                            context.getConcurrencyLimit());
+                } catch (RuntimeException e) {
+                    // 并发限制器自身故障：fail-open，避免治理组件异常阻断业务
+                    limiterFailed = true;
+                    log.error("并发限制器执行故障，放行请求 - API: {}, 错误: {}",
+                            context.getApiKey(), e.getMessage(), e);
+                }
+                if (!limiterFailed && permit == null) {
+                    rejected = true;
+                    ApiGovernanceProperties.Concurrency config = properties.getConcurrencyLimit();
+                    context.setRejectStatus(config.getRejectStatus());
+                    context.setRejectReason(config.getMessage());
+                    context.addResponseHeader("Retry-After", "1");
+                    throw new GovernanceException(config.getRejectStatus(), "CONCURRENCY_LIMIT",
+                            config.getMessage(), context.getResponseHeaders());
+                }
+            }
+            // 8. 执行业务逻辑（只调用一次）
             return result = joinPoint.proceed();
         } catch (Throwable t) {
             error = t;
             throw t;
         } finally {
-            // 8. 后置过滤器链：无论成功/失败/拒绝都执行
+            // 9. 归还并发名额（先释放，避免后置过滤器耗时占用配额）
+            if (permit != null) {
+                permit.release();
+            }
+            // 10. 后置过滤器链：无论成功/失败/拒绝都执行
             context.setRejected(rejected);
             context.setResult(result);
             context.setError(error);
@@ -333,6 +385,8 @@ public class GovernanceAspect {
     private void resolveRateLimit(Class<?> targetClass, Method method, FilterContext context) {
         RateLimitPolicy policy = RateLimitPolicyResolver.resolve(targetClass, method,
                 context.getApiKey(), properties, rateRuleStore);
+        // 复用同一次规则查找：并发策略不再重复访问存储
+        context.setDynamicRule(policy.getDynamicRule());
 
         // 注解 / 全局默认（动态规则之前）的结果：limit >= 0 表示启用限流
         if (policy.isAnnotationEnabled()) {
@@ -365,6 +419,24 @@ public class GovernanceAspect {
         if (log.isDebugEnabled()) {
             log.debug("动态规则覆盖限流 - API: {}, rule: {}, limit: {}/{}(秒)",
                     context.getApiKey(), rule.getPattern(), rule.getLimit(), rule.getWindow());
+        }
+    }
+
+    /**
+     * 解析并发上限并写入上下文（1.0.0 新增）。
+     *
+     * <p>优先级：动态规则 {@code maxConcurrent} &gt; 方法 {@code @ConcurrencyLimit}
+     * &gt; 类 {@code @ConcurrencyLimit} &gt; 全局默认。复用
+     * {@link FilterContext#getDynamicRule()}，不重复访问规则存储。
+     */
+    private void resolveConcurrency(Class<?> targetClass, Method method, FilterContext context) {
+        ConcurrencyPolicy policy = ConcurrencyPolicyResolver.resolve(targetClass, method,
+                properties, context.getDynamicRule());
+        context.setConcurrencyLimitEnabled(policy.isEnabled());
+        context.setConcurrencyLimit(policy.getPermits());
+        if (policy.isEnabled() && log.isDebugEnabled()) {
+            log.debug("启用并发限制 - API: {}, permits: {}, source: {}",
+                    context.getApiKey(), policy.getPermits(), policy.getSource().getCode());
         }
     }
 

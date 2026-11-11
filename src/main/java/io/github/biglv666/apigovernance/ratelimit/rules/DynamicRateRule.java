@@ -64,18 +64,26 @@ public final class DynamicRateRule {
     private final String reason;
 
     /**
+     * 并发上限（1.0.0 新增）：{@code >0} 覆盖注解；{@code -1} 关闭并发限制；
+     * {@code 0} 表示不干预（沿用注解 / 全局默认）。
+     */
+    private final int maxConcurrent;
+
+    /**
      * 构造动态规则（参数已校验）。
      *
-     * @param pattern     匹配模式
-     * @param limit       限流阈值
-     * @param window      时间窗口（秒）
-     * @param updatedAtMs 写入时间戳（毫秒）
-     * @param expiresAtMs 到期时间戳（毫秒，0 = 永久）
-     * @param operator    操作人（可为 null）
-     * @param reason      变更原因（可为 null）
+     * @param pattern       匹配模式
+     * @param limit         限流阈值
+     * @param window        时间窗口（秒）
+     * @param updatedAtMs   写入时间戳（毫秒）
+     * @param expiresAtMs   到期时间戳（毫秒，0 = 永久）
+     * @param operator      操作人（可为 null）
+     * @param reason        变更原因（可为 null）
+     * @param maxConcurrent 并发上限（0 = 不干预）
      */
     private DynamicRateRule(String pattern, int limit, int window, long updatedAtMs,
-                            long expiresAtMs, String operator, String reason) {
+                            long expiresAtMs, String operator, String reason,
+                            int maxConcurrent) {
         this.pattern = pattern;
         this.limit = limit;
         this.window = window;
@@ -83,6 +91,7 @@ public final class DynamicRateRule {
         this.expiresAtMs = expiresAtMs;
         this.operator = operator == null ? "" : operator;
         this.reason = reason == null ? "" : reason;
+        this.maxConcurrent = maxConcurrent;
     }
 
     /**
@@ -95,7 +104,7 @@ public final class DynamicRateRule {
      * @throws IllegalArgumentException 参数不合法时抛出（管理接口转换为 400 响应）
      */
     public static DynamicRateRule of(String pattern, int limit, int window) {
-        return of(pattern, limit, window, 0L, null, null);
+        return of(pattern, limit, window, 0L, null, null, 0);
     }
 
     /**
@@ -112,13 +121,34 @@ public final class DynamicRateRule {
      */
     public static DynamicRateRule of(String pattern, int limit, int window,
                                      Long ttlSeconds, String operator, String reason) {
+        return of(pattern, limit, window, ttlSeconds, operator, reason, 0);
+    }
+
+    /**
+     * 创建并校验一条完整动态规则（1.0.0 新增，含并发上限）。
+     *
+     * @param pattern       匹配模式（非空；{@code *} 只允许作为末字符出现）
+     * @param limit         限流阈值（至少 -1）
+     * @param window        时间窗口秒数（至少 1）
+     * @param ttlSeconds    有效期秒数；{@code null} / {@code <= 0} 表示永久有效
+     * @param operator      操作人（可空，最长 {@value #MAX_METADATA_LENGTH}）
+     * @param reason        变更原因（可空，最长 {@value #MAX_METADATA_LENGTH}）
+     * @param maxConcurrent 并发上限（0 = 不干预，-1 = 关闭，&gt;0 = 上限）
+     * @return 不可变规则
+     * @throws IllegalArgumentException 参数不合法时抛出（管理接口转换为 400 响应）
+     */
+    public static DynamicRateRule of(String pattern, int limit, int window,
+                                     Long ttlSeconds, String operator, String reason,
+                                     Integer maxConcurrent) {
         String trimmed = validatePattern(pattern);
         validateLimit(limit);
         validateWindow(window);
+        validateMaxConcurrent(maxConcurrent);
         long now = System.currentTimeMillis();
         long expiresAt = expiresAt(now, ttlSeconds);
         return new DynamicRateRule(trimmed, limit, window, now, expiresAt,
-                validateMetadata(operator, "operator"), validateMetadata(reason, "reason"));
+                validateMetadata(operator, "operator"), validateMetadata(reason, "reason"),
+                maxConcurrent == null ? 0 : maxConcurrent);
     }
 
     /**
@@ -132,7 +162,7 @@ public final class DynamicRateRule {
      * @return 不可变规则
      */
     static DynamicRateRule restore(String pattern, int limit, int window, long updatedAtMs) {
-        return new DynamicRateRule(pattern, limit, window, updatedAtMs, 0L, "", "");
+        return new DynamicRateRule(pattern, limit, window, updatedAtMs, 0L, "", "", 0);
     }
 
     /**
@@ -150,7 +180,27 @@ public final class DynamicRateRule {
     static DynamicRateRule restore(String pattern, int limit, int window, long updatedAtMs,
                                    long expiresAtMs, String operator, String reason) {
         return new DynamicRateRule(pattern, limit, window, updatedAtMs, expiresAtMs,
-                operator, reason);
+                operator, reason, 0);
+    }
+
+    /**
+     * 从存储层还原完整规则（1.0.0 新增，含并发上限）。
+     *
+     * @param pattern       匹配模式（存储层已校验过）
+     * @param limit         限流阈值
+     * @param window        时间窗口（秒）
+     * @param updatedAtMs   原写入时间戳（毫秒）
+     * @param expiresAtMs   原到期时间戳（毫秒，0 = 永久）
+     * @param operator      操作人
+     * @param reason        变更原因
+     * @param maxConcurrent 并发上限（0 = 不干预）
+     * @return 不可变规则
+     */
+    static DynamicRateRule restore(String pattern, int limit, int window, long updatedAtMs,
+                                   long expiresAtMs, String operator, String reason,
+                                   int maxConcurrent) {
+        return new DynamicRateRule(pattern, limit, window, updatedAtMs, expiresAtMs,
+                operator, reason, maxConcurrent);
     }
 
     /**
@@ -215,6 +265,15 @@ public final class DynamicRateRule {
         return reason;
     }
 
+    /**
+     * 并发上限（1.0.0 新增）。
+     *
+     * @return {@code >0} 并发上限；{@code -1} 关闭；{@code 0} 不干预注解/全局默认
+     */
+    public int getMaxConcurrent() {
+        return maxConcurrent;
+    }
+
     private static String validatePattern(String pattern) {
         if (pattern == null || pattern.isBlank()) {
             throw new IllegalArgumentException("规则 pattern 不能为空");
@@ -240,6 +299,13 @@ public final class DynamicRateRule {
     private static void validateWindow(int window) {
         if (window < 1) {
             throw new IllegalArgumentException("规则 window 至少为 1 秒，收到: " + window);
+        }
+    }
+
+    private static void validateMaxConcurrent(Integer maxConcurrent) {
+        if (maxConcurrent != null && maxConcurrent < -1) {
+            throw new IllegalArgumentException(
+                    "规则 maxConcurrent 至少为 -1（-1=关闭，0=不干预），收到: " + maxConcurrent);
         }
     }
 
@@ -273,12 +339,13 @@ public final class DynamicRateRule {
         if (!(o instanceof DynamicRateRule that)) {
             return false;
         }
-        return limit == that.limit && window == that.window && pattern.equals(that.pattern);
+        return limit == that.limit && window == that.window
+                && maxConcurrent == that.maxConcurrent && pattern.equals(that.pattern);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(pattern, limit, window);
+        return Objects.hash(pattern, limit, window, maxConcurrent);
     }
 
     @Override
@@ -286,6 +353,6 @@ public final class DynamicRateRule {
         return "DynamicRateRule{pattern='" + pattern + "', limit=" + limit
                 + ", window=" + window + ", updatedAt=" + updatedAtMs
                 + ", expiresAt=" + expiresAtMs + ", operator='" + operator
-                + "', reason='" + reason + "'}";
+                + "', reason='" + reason + "', maxConcurrent=" + maxConcurrent + '}';
     }
 }

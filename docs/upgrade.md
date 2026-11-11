@@ -4,6 +4,36 @@
 
 ## 版本升级
 
+### 从 0.8.0 升级到 1.0.0
+
+1.0.0 是平台大版本，**只支持 Spring Boot 4.1.x / Java 17+**。功能默认行为保持 0.8.0：
+
+1. **平台升级**：Spring Boot 3.5 → 4.1（Spring Framework 7、Jakarta EE 11、Jackson 3）。
+   宿主若直接使用 Jackson 2（`com.fasterxml.jackson.*`），需迁移到 Jackson 3
+   （`tools.jackson.*`）；starter 主代码不直接依赖 Jackson，不受影响；
+2. **Starter 名称变化**：Boot 4 将 `spring-boot-starter-aop` 更名为
+   `spring-boot-starter-aspectj`，MockMvc 测试自动配置拆分到
+   `spring-boot-starter-webmvc-test`。仅影响宿主显式声明这些依赖的场景；
+3. **Actuator 健康 API 包名**：`org.springframework.boot.actuate.health.*` →
+   `org.springframework.boot.health.contributor.*`。只影响自行实现/直接引用健康指示器的宿主；
+   通过本 starter 自动装配的用户无感；
+4. **并发治理默认开启但零行为变化**：只有标注 `@ConcurrencyLimit` 或动态规则设置
+   `maxConcurrent` 时才生效；`body-size-limit` 与 `problem-details` 默认关闭。
+   自定义 `RateRuleStore` 若只实现了 0.7.0 的三参 `put`，写入非零 `maxConcurrent`
+   会被明确拒绝（而非静默丢弃）——需要并发语义请覆盖 `put(DynamicRateRule)`；
+5. **少量公共类型签名变化**（1.0 为 major 版本）：
+   - `RuleAuditEntry` 新增 `beforeMaxConcurrent` / `afterMaxConcurrent` 两个 record 组件；
+   - `RateLimitPolicyResolver.ApiKeyResolution` 新增 `targetClass` / `method` 组件；
+   - `GovernanceExceptionHandler` 新增接收 `ApiGovernanceProperties` 的构造器，
+     无参构造器保留；`handleGovernanceException(GovernanceException)` 签名保持不变；
+   - `GovernanceAspect` 新增四参构造器，旧二参/三参构造器保留。
+
+新增能力：`@ConcurrencyLimit` 本地 bulkhead、动态规则 `maxConcurrent`、请求体大小限制
+（413）、可选 RFC 9457 `application/problem+json`。详见[并发治理](concurrency.md)。
+
+> **0.8.0 用户**：0.8.0 是最后一个 Boot 3.x 版本。继续使用 Boot 3.3–3.5 的宿主请停留在
+> 0.8.0；升级到 1.0.0 需要同步升级到 Boot 4.1。
+
 ### 从 0.7.0 升级到 0.8.0
 
 全部为增量特性，现有行为不变（默认值均已保持 0.7.0 语义）：

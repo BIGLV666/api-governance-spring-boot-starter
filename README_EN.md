@@ -14,7 +14,7 @@ strategies, admin endpoints — with **no heavy external dependencies**.
 ## 1. Features
 
 - ✅ **Intercepts all Controller requests by default** — no annotations required (governance = logging + metrics).
-- ✅ **Minimal annotations** — only `@RateLimit` / `@Skip` / `@NoLog`, to override defaults where needed.
+- ✅ **Minimal annotations** — only `@RateLimit` / `@ConcurrencyLimit` / `@Skip` / `@NoLog`, to override defaults where needed.
 - ✅ **Standard filter pipeline** — pre-chain short-circuits (metadata → traffic stats → rate limit → custom),
   post-chain always runs (elapsed time → stats → logging → custom); `pjp.proceed()` is invoked exactly once.
 - ✅ **Two rate-limit storages** — local (zero dependency) and Redis (distributed; thin wrapper + atomic Lua).
@@ -52,14 +52,20 @@ strategies, admin endpoints — with **no heavy external dependencies**.
 - ✅ **Cluster-wide alert deduplication** (new in 0.7.0) — with multiple instances, the same alert is
   delivered once per cluster per suppression window (recovery notices included), via Redis `SET NX`
   arbitration; fail-open falls back to per-instance delivery when Redis is down.
-- ✅ **Boot 3.3–3.5 compatibility matrix** (new in 0.7.0) — baseline Spring Boot 3.5; CI runs the full
-  suite against 3.3/3.4/3.5 × JDK 17/21.
 - ✅ **Full rule lifecycle** (new in 0.8.0) — rule TTL with lazy expiry (temporary bans and tightening
   lift themselves), operator/reason metadata, an effective-rule explain endpoint, change audit, and
   import/export plus startup seed files (rules as code).
 - ✅ **Actuator health & info** (new in 0.8.0) — `/actuator/health` reports limiter failures, stale
   rule stores and async-pool saturation; UP/DOWN follows `fail-strategy` so a brief Redis outage does
   not restart pods. `/actuator/info` shows the configuration actually in effect.
+- ✅ **Concurrency bulkhead** (new in 1.0.0) — `@ConcurrencyLimit(permits = N)` plus dynamic rule
+  `maxConcurrent` caps in-flight requests per endpoint; excess requests fail fast without occupying
+  threads, and permits are released in `finally` on success, exception and timeout paths.
+- ✅ **Overload protection & standard errors** (new in 1.0.0) — optional request-body size limit
+  (413 before deserialization) and optional RFC 9457 `application/problem+json` responses. Both are
+  off by default.
+- ✅ **Spring Boot 4.1 baseline** (new in 1.0.0) — Spring Framework 7 / Jakarta EE 11 / Jackson 3,
+  CI on JDK 17 / 21 / 25, CycloneDX SBOM, japicmp compatibility check and reproducible builds.
 
 ---
 
@@ -71,9 +77,12 @@ strategies, admin endpoints — with **no heavy external dependencies**.
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.8.0</version>
+    <version>1.0.0</version>
 </dependency>
 ```
+
+> 1.0.0 targets **Spring Boot 4.1.x / Java 17+** (Jackson 3). Hosts still on Boot 3.3–3.5 should
+> use 0.8.0.
 
 ### 2) It just works
 
@@ -148,6 +157,20 @@ api:
         audit-capacity: 1000          # new in 0.8.0: in-memory audit ring buffer (0 = disabled)
         seed-location: ""             # new in 0.8.0: startup seed YAML (classpath:/file:)
         seed-fail-fast: true          # new in 0.8.0: invalid seed fails startup (false = skip + warn)
+    concurrency-limit:                # new in 1.0.0: in-flight request cap (bulkhead)
+      enabled: true                   # applies when annotation/dynamic rule/global default permits > 0
+      default-permits: -1             # global default (-1 = unlimited)
+      max-entries: 10000              # local semaphore key cap
+      idle-timeout-ms: 600000         # idle bucket eviction
+      reject-status: 429
+      message: "Too many concurrent requests, please retry later"
+    body-size-limit:                  # new in 1.0.0: request body size limit (off by default)
+      enabled: false
+      max-bytes: 1048576              # 1 MiB
+      reject-status: 413
+      message: "Request body exceeds the size limit"
+    problem-details:                  # new in 1.0.0: RFC 9457 application/problem+json (off by default)
+      enabled: false
     filters:                          # built-in filter switches (new in 0.3.0); same-type beans also override
       metadata-collector: true
       traffic-statistics: true
@@ -359,6 +382,38 @@ rules:
     reason: campaign tightening
 ```
 
+### 9) Concurrency bulkhead (new in 1.0.0)
+
+Rate limiting caps requests per second but not in-flight requests. A slow downstream can still
+occupy every worker thread. `@ConcurrencyLimit` caps simultaneous executions; excess requests are
+rejected immediately (no queueing, no thread occupied):
+
+```java
+@PostMapping("/orders")
+@ConcurrencyLimit(permits = 10)   // at most 10 in-flight requests
+public Order create(@RequestBody Order order) { ... }
+```
+
+Dynamic rules expose the same control through `maxConcurrent` (`>0` cap, `0` no override, `-1`
+disable), so an incident can tighten or lift it without a restart. Permits are released in
+`finally` — exceptions and timeouts cannot leak them. Default rejection is 429 with
+`Retry-After: 1`.
+
+Optional overload protection:
+
+```yaml
+api:
+  governance:
+    body-size-limit:
+      enabled: true
+      max-bytes: 1048576        # 413 before deserialization
+    problem-details:
+      enabled: true             # RFC 9457 application/problem+json
+```
+
+See [docs/concurrency.md](docs/concurrency.md) for semantics and limits (local-only bulkhead
+in 1.0.0).
+
 ---
 
 ## 5. Filter Pipeline (custom plugins)
@@ -535,7 +590,7 @@ Base path defaults to `/api-governance` (configurable):
 | POST | `/rate-limiter/reset?key=` | reset a key |
 | POST | `/rate-limiter/reset-all` | reset all |
 | GET | `/rate-limiter/rules` | dynamic rate-limit rules list (new in 0.7.0; TTL/metadata since 0.8.0) |
-| PUT | `/rate-limiter/rules` | upsert one dynamic rule, effective immediately (new in 0.7.0; `ttlSeconds`/`operator`/`reason` since 0.8.0) |
+| PUT | `/rate-limiter/rules` | upsert one dynamic rule, effective immediately (new in 0.7.0; `ttlSeconds`/`operator`/`reason` since 0.8.0, `maxConcurrent` since 1.0.0) |
 | DELETE | `/rate-limiter/rules?pattern=` | delete one dynamic rule (idempotent, new in 0.7.0) |
 | GET | `/rate-limiter/rules/effective?apiKey=` | explain the effective policy and its source (new in 0.8.0) |
 | GET | `/rate-limiter/rules/audit?limit=` | rule change audit, newest first (new in 0.8.0) |
@@ -619,7 +674,7 @@ and `correlationId` independently — do not use `traceId` for consumer idempote
 
 | Dependency | Purpose | Optional |
 |------------|---------|----------|
-| spring-boot-starter-aop | AOP + core container | No |
+| spring-boot-starter-aspectj | AOP + core container (renamed from starter-aop in Boot 4) | No |
 | spring-web | @RestController annotations | No |
 | jakarta.servlet-api | admin auth filter (provided; supplied by host container at runtime) | No (not transitive) |
 | spring-boot-starter-actuator | Observation, tracing, Micrometer metrics, health/info (since 0.8.0) | Yes |
@@ -636,6 +691,32 @@ and `correlationId` independently — do not use `traceId` for consumer idempote
 ---
 
 ## 13. Version Upgrades
+
+### Upgrading from 0.8.0 to 1.0.0
+
+1.0.0 is a platform major release and **requires Spring Boot 4.1.x / Java 17+**. Runtime behaviour
+remains 0.8.0-compatible:
+
+1. **Platform upgrade**: Boot 3.5 → 4.1 (Spring Framework 7, Jakarta EE 11, Jackson 3). Hosts using
+   Jackson 2 directly must migrate to `tools.jackson.*`; the starter itself does not depend on
+   Jackson;
+2. **Starter renames**: `spring-boot-starter-aop` → `spring-boot-starter-aspectj`; MockMvc test
+   auto-configuration moved to `spring-boot-starter-webmvc-test`;
+3. **Actuator health package**: `org.springframework.boot.actuate.health.*` →
+   `org.springframework.boot.health.contributor.*` (only matters if you implement/reference health
+   indicators directly);
+4. **Concurrency governance is on by default but inert**: it only applies to endpoints annotated
+   with `@ConcurrencyLimit` or covered by a dynamic rule with `maxConcurrent`;
+   `body-size-limit` and `problem-details` are disabled by default;
+5. **Minor public type changes** (major release): `RuleAuditEntry` gained
+   `beforeMaxConcurrent` / `afterMaxConcurrent`; `ApiKeyResolution` gained `targetClass` / `method`;
+   `GovernanceExceptionHandler` gained a constructor accepting properties (no-arg constructor kept);
+   `GovernanceAspect` gained a four-argument constructor (older constructors kept).
+
+New capabilities: local concurrency bulkhead, dynamic `maxConcurrent`, request-body size limit
+(413), optional RFC 9457 problem details. See [docs/concurrency.md](docs/concurrency.md).
+
+> **0.8.0 is the last Boot 3.x release.** Hosts staying on Boot 3.3–3.5 should remain on 0.8.0.
 
 ### Upgrading from 0.7.0 to 0.8.0
 
@@ -728,7 +809,7 @@ Two internal changes worth knowing:
 ## 14. Docs
 
 - [中文文档](./README.md)：Chinese version of this document.
-- [docs/](./docs)：configuration, rate limiting, filters, async hooks, observability, admin API, tracing.
+- [docs/](./docs)：configuration, rate limiting, concurrency, filters, async hooks, observability, admin API, tracing.
 - [CHANGELOG.md](./CHANGELOG.md)：changes by release.
 - [ASYNC_ACTIONS.md](./docs/ASYNC_ACTIONS.md)：async action contract.
 - [examples/api-governance-example](./examples/api-governance-example)：minimal runnable demo.

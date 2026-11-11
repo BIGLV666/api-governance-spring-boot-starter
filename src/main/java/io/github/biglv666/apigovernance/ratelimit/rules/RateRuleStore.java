@@ -61,14 +61,21 @@ public interface RateRuleStore {
     /**
      * 新增或覆盖一条完整规则（含 TTL / 操作元数据，0.8.0 新增）。
      *
-     * <p>默认实现退化为 0.7.0 的三参写入，忽略 TTL 与元数据；内置存储覆盖本方法。
+     * <p>默认实现退化为 0.7.0 的三参写入，忽略 TTL 与元数据；但<b>不允许静默丢弃
+     * 并发上限</b>：{@code maxConcurrent != 0} 时直接抛异常，避免管理接口报告成功、
+     * 实际却没有并发控制。需要并发语义的自定义存储请覆盖本方法。
      *
      * @param rule 完整规则
-     * @throws IllegalArgumentException 规则不合法、已过期或超出规则数上限
+     * @throws IllegalArgumentException 规则不合法、已过期、超出上限，
+     *                                  或存储实现不支持 {@code maxConcurrent}
      * @throws IllegalStateException    远程存储写入失败（Redis 版）
      */
     default void put(DynamicRateRule rule) {
         Objects.requireNonNull(rule, "rule");
+        if (rule.getMaxConcurrent() != 0) {
+            throw new IllegalArgumentException("当前 RateRuleStore 实现不支持 maxConcurrent，"
+                    + "请覆盖 put(DynamicRateRule) 或移除该字段");
+        }
         put(rule.getPattern(), rule.getLimit(), rule.getWindow());
     }
 

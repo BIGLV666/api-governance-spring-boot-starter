@@ -15,7 +15,7 @@
 ## 特性
 
 - ✅ **默认拦截所有 Controller 请求**：无需任何注解即可生效（治理 = 日志 + 指标统计）。
-- ✅ **最少注解**：仅 `@RateLimit` / `@Skip` / `@NoLog` 三个注解，按需覆盖默认行为。
+- ✅ **最少注解**：仅 `@RateLimit` / `@ConcurrencyLimit` / `@Skip` / `@NoLog` 四个注解，按需覆盖默认行为。
 - ✅ **标准管道过滤器**：前置链短路（信息采集 → 流量统计 → 限流判断 → 自定义），
   后置链兜底（记录耗时 → 更新统计 → 日志记录 → 自定义），`pjp.proceed()` 只调用一次。
 - ✅ **两种限流存储**：本机限流（零依赖）、Redis 限流（分布式，Redis 只封装 + Lua 原子化）。
@@ -41,9 +41,11 @@
 - ✅ **Grafana 面板**（0.6.0 新增）：内置 10 面板仪表盘 JSON（请求/拒绝/耗时分位/异步池水位），真实应用链路已验证，导入即用。
 - ✅ **动态限流规则**（0.7.0 新增）：管理接口运行期提交限流规则（支持尾部 `*` 通配），**无需重启即可调整/放开/封禁**；local 模式单节点生效，Redis 模式全集群秒级一致，存储故障 fail-stale 不影响业务。
 - ✅ **集群告警去重**（0.7.0 新增）：多实例部署时同一告警每抑制窗口全集群只发一条（含恢复通知），Redis `SET NX` 抢占，故障 fail-open 回退单机行为。
-- ✅ **Boot 3.3–3.5 兼容矩阵**（0.7.0 新增）：基线 Spring Boot 3.5，CI 覆盖 3.3/3.4/3.5 × JDK 17/21 全量回归。
 - ✅ **规则生命周期闭环**（0.8.0 新增）：规则 TTL 自动失效（临时封禁/收紧到期即恢复，无需人工解除）、操作人/原因元数据、生效规则解释端点（一键回答「为什么没限流」）、变更审计与导入/导出/启动种子（规则即代码）。
 - ✅ **Actuator 健康与 Info**（0.8.0 新增）：`/actuator/health` 暴露限流器故障、规则存储陈旧与线程池饱和度，按 fail-strategy 区分 UP/DOWN，避免 Redis 抖动误触发探针重启；`/actuator/info` 展示实际生效配置。
+- ✅ **并发上限 bulkhead**（1.0.0 新增）：`@ConcurrencyLimit(permits = N)` + 动态规则 `maxConcurrent`，限制同时在途请求数，超限快速拒绝、不占线程；名额在 finally 归还，异常/超时路径不泄漏。
+- ✅ **过载保护与标准错误体**（1.0.0 新增）：可选请求体大小限制（反序列化前 413）、可选 RFC 9457 `application/problem+json` 错误响应；默认关闭，保持既有行为。
+- ✅ **Spring Boot 4.1 基线**（1.0.0 新增）：Spring Framework 7 / Jakarta EE 11 / Jackson 3，CI 覆盖 JDK 17 / 21 / 25；新增 CycloneDX SBOM、japicmp 兼容检查与可复现构建。
 
 ---
 
@@ -55,9 +57,11 @@
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>api-governance-spring-boot-starter</artifactId>
-    <version>0.8.0</version>
+    <version>1.0.0</version>
 </dependency>
 ```
+
+> 1.0.0 基于 **Spring Boot 4.1.x / Java 17+**（Jackson 3）。仍在使用 Boot 3.3–3.5 的宿主请使用 0.8.0。
 
 ### 2. 开箱即用
 
@@ -108,6 +112,7 @@ public class UserController {
 |------|------|
 | [配置参考](docs/configuration.md) | `api.governance.*` 全部配置项与默认值 |
 | [限流](docs/rate-limiting.md) | 本机 / Redis 限流、算法、SpEL 参数维度、标准响应头、故障降级、动态规则 TTL / 导入导出 / 启动种子 |
+| [并发治理](docs/concurrency.md) | 并发上限 bulkhead、动态 `maxConcurrent`、请求体大小限制、RFC 9457 错误体 |
 | [过滤器管道](docs/filters.md) | 自定义 `PreFilter` / `PostFilter` 插件与内置过滤器 |
 | [异步方法插件](docs/async.md) | `@AsyncAction` / `@AsyncHandler` 与异步可观测性（[完整契约](docs/ASYNC_ACTIONS.md)） |
 | [可观测性](docs/observability.md) | 内存指标、Micrometer 桥接、Grafana 面板、告警、Actuator 健康与 Info |

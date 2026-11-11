@@ -16,7 +16,7 @@ class InMemoryRuleAuditLogTest {
 
     private static RuleAuditEntry entry(int index) {
         return new RuleAuditEntry(1000L + index, RuleAuditEntry.Action.PUT,
-                "a.Api" + index + "#get", null, null, index, 10, 0L,
+                "a.Api" + index + "#get", null, null, index, 10, null, null, 0L,
                 "ops", "127.0.0.1", true, "ok");
     }
 

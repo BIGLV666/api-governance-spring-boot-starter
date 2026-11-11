@@ -3,6 +3,41 @@
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)，版本号格式 `MAJOR.MINOR.PATCH`。
 0.x 阶段 MINOR 版本可能包含行为调整，升级前请阅读[版本升级](docs/upgrade.md)。
 
+## [1.0.0] - 2026-11-11
+
+主题：Spring Boot 4.1 平台升级 + 并发/容量治理 + API 冻结与发布工程。
+
+### 新增
+
+- **并发上限（bulkhead）**：`@ConcurrencyLimit(permits = N)` 限制单接口同时在途请求数，
+  超限立即拒绝（429 + `Retry-After`），不排队、不占线程；名额在 `finally` 归还，
+  异常/超时路径不泄漏。
+- **动态规则 `maxConcurrent`**：`>0` 覆盖、`0` 不干预、`-1` 关闭；写入 Redis/内存规则存储，
+  管理接口 PUT/import/export/list/audit 与 `/rules/effective` 均支持。
+- **请求体大小限制**：`body-size-limit.enabled=true` 时在反序列化前拒绝超大 body
+  （已知 Content-Length 直接 413；分块传输按实际读取字节计数）。
+- **可选 RFC 9457 错误体**：`problem-details.enabled=true` 时治理拒绝返回
+  `application/problem+json`；默认关闭，保持原结构。
+- **平台升级**：Spring Boot 4.1.2 / Spring Framework 7 / Jakarta EE 11 / Jackson 3；
+  CI 矩阵 JDK 17/21/25。
+- **发布工程**：CycloneDX SBOM（`target/bom.json`）、可复现构建
+  （`project.build.outputTimestamp`）、`-Pcompat` japicmp 二进制兼容检查。
+
+### 变更（1.0.0 为 major 版本）
+
+- `RuleAuditEntry` 新增 `beforeMaxConcurrent` / `afterMaxConcurrent`。
+- `RateLimitPolicyResolver.ApiKeyResolution` 新增 `targetClass` / `method`。
+- `GovernanceExceptionHandler` 新增接收 `ApiGovernanceProperties` 的构造器（无参构造器保留）。
+- `GovernanceAspect` 新增四参构造器（旧二参/三参构造器保留）。
+- Actuator 健康 API 迁移至 `org.springframework.boot.health.contributor`；
+  MockMvc 测试自动配置迁移至 `spring-boot-starter-webmvc-test`。
+
+### 兼容性
+
+- 运行期默认行为与 0.8.0 一致；并发限制默认开启但仅在注解/动态规则/全局默认命中时生效，
+  body 限制与 problem details 默认关闭。
+- 0.8.0 是最后一个 Boot 3.x 版本；1.0.0 只支持 Boot 4.1.x / Java 17+。
+
 ## [0.8.0] - 2026-11-06
 
 主题：动态规则运维闭环（TTL / 解释 / 审计 / 导入导出 / 启动种子）+ Actuator 健康与 Info。
