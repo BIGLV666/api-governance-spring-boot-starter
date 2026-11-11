@@ -43,22 +43,17 @@
 - `ApiGovernanceProperties.Management` 新增 `health-enabled` / `health-stale-multiplier`；
   `DynamicRules` 新增 `default-ttl-seconds` / `audit-capacity` / `seed-location` / `seed-fail-fast`。
 
-### 测试
-
-- 新增策略解析、TTL 匹配、审计缓冲、种子加载、健康/Info、0.8.0 管理端点与装配测试；
-  全量 `259` 个测试通过（1 个环境相关跳过）。
-
 ## [0.7.0] - 2026-10-04
 
 - 动态限流规则热更新（本地内存 / Redis 全集群，尾部 `*` 通配，fail-stale）。
 - 集群告警去重（Redis `SET NX`，fail-open）。
-- Spring Boot 基线升至 3.5.16，CI 矩阵覆盖 3.3.13 / 3.4.13 / 3.5.16 × JDK 17/21。
+- Spring Boot 基线升至 3.5.16，兼容 3.3 / 3.4 / 3.5 与 JDK 17/21。
 
 ## [0.6.0] - 2026-09-28
 
 - 标准限流响应头（`RateLimit-*` / `Retry-After`）。
 - 告警恢复通知（限流器故障恢复、慢方法安静窗口）。
-- Grafana 面板与 3 master Redis 集群集成测试。
+- Grafana 面板与 Redis 集群限流回归验证。
 
 ## [0.5.1] - 2026-09-28
 

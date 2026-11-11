@@ -2,8 +2,6 @@
 
 > 本文档为[项目主页](../README.md)的拆分章节；索引与快速开始见主页。
 
-## 配置（application.yml）
-
 ```yaml
 api:
   governance:
